@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# fatllm: manage FATLLM (full server access for Claude) on this server.
+set -euo pipefail
+
+CONF=/etc/fatllm/fatllm.env
+STATE=/var/lib/fatllm
+RAW="${FATLLM_RAW:-https://raw.githubusercontent.com/SaeedCrazy/FATLLM-FULL-ACCESS-TO-LLM-/HEAD}"
+UNITS="fatllm fatllm-caddy fatllm-tunnel"
+
+usage() {
+  cat <<'EOF'
+fatllm - full server access for Claude
+
+  fatllm key            show the key (give it to Claude)
+  fatllm rotate         make a new key; the old one stops working at once
+  fatllm off            turn access off (services stopped)
+  fatllm on             turn it back on
+  fatllm status         is it running, address, expiry
+  fatllm log [N]        last N things Claude did (default 40)
+  fatllm expire <time>  key stops working after 30m / 12h / 7d, or "never"
+  fatllm test           check the key works from this server
+  fatllm update         update FATLLM, keep the key
+  fatllm uninstall      remove everything
+EOF
+}
+
+need_root() { [ "$(id -u)" = 0 ] || { echo "Run as root: sudo fatllm" >&2; exit 1; }; }
+# shellcheck disable=SC1090
+load() { [ -f "$CONF" ] || { echo "FATLLM is not installed." >&2; exit 1; }; set -a; . "$CONF"; set +a; }
+
+set_conf() {
+  local key="$1" val="$2"
+  if grep -q "^$key=" "$CONF"; then sed -i "s|^$key=.*|$key=$val|" "$CONF"; else echo "$key=$val" >> "$CONF"; fi
+}
+
+new_token() { python3 -c 'import secrets; print("fat_" + secrets.token_urlsafe(32))'; }
+
+units_for_mode() {
+  if [ "${FATLLM_MODE:-caddy}" = tunnel ]; then echo "fatllm fatllm-tunnel"; else echo "fatllm fatllm-caddy"; fi
+}
+
+tunnel_url() { grep -aoE 'https://[a-z0-9]+(-[a-z0-9]+)+\.trycloudflare\.com' "$STATE/tunnel.log" 2>/dev/null | tail -1 || true; }
+
+# Public address without the token (waits a little for a fresh tunnel).
+public_base() {
+  if [ "${FATLLM_MODE:-caddy}" = tunnel ]; then
+    local u=""
+    for _ in $(seq 1 30); do u="$(tunnel_url)"; [ -n "$u" ] && break; sleep 1; done
+    [ -n "$u" ] || return 1
+    echo "$u"
+  else
+    echo "$FATLLM_PUBLIC_URL"
+  fi
+}
+
+show_key() {
+  local base key
+  if ! base="$(public_base)"; then
+    echo "The tunnel has no address yet. Try again in a minute: fatllm key" >&2
+    return 1
+  fi
+  key="$base/$FATLLM_TOKEN"
+  local exp="never"
+  [ "${FATLLM_EXPIRES:-0}" != 0 ] && exp="$(date -d "@$FATLLM_EXPIRES" '+%Y-%m-%d %H:%M %Z' 2>/dev/null || echo "$FATLLM_EXPIRES")"
+  cat <<EOF
+
+=================== FATLLM KEY ===================
+Full root access to this server. Keep it secret.
+
+$key
+
+Give it to Claude:
+ * Claude Code / any chat: paste the key and say
+   "this is my server's FATLLM key, read it with curl and use it"
+ * claude.ai connector URL (Settings > Connectors):
+   $key/mcp
+Expires: $exp
+New key (old stops working): fatllm rotate | Off: fatllm off
+EOF
+  if [ "${FATLLM_MODE:-caddy}" = tunnel ]; then
+    echo "Note: tunnel mode. The address changes after a reboot or restart;"
+    echo "      run 'fatllm key' again then."
+  fi
+  echo "=================================================="
+}
+
+check() {
+  local base="$1" url
+  url="$base/$FATLLM_TOKEN/info"
+  if [ "${FATLLM_MODE:-caddy}" = caddy ]; then
+    local hp="${base#https://}" host port
+    host="${hp%%:*}"; port=443
+    [ "$hp" != "$host" ] && port="${hp##*:}"
+    curl -fsS --noproxy '*' --max-time 10 --resolve "$host:$port:127.0.0.1" "$url" >/dev/null 2>&1
+  else
+    curl -fsS --max-time 15 "$url" >/dev/null 2>&1
+  fi
+}
+
+restart_agent() { systemctl restart fatllm; sleep 1; }
+
+cmd="${1:-key}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  key | show)
+    need_root; load; show_key ;;
+  rotate | new-key)
+    need_root; load
+    set_conf FATLLM_TOKEN "$(new_token)"
+    load; restart_agent
+    echo "New key made. The old key no longer works."
+    show_key ;;
+  off | stop)
+    need_root; load
+    systemctl disable --now $UNITS >/dev/null 2>&1 || true
+    echo "FATLLM is off. Nobody can use the key until: fatllm on" ;;
+  on | start)
+    need_root; load
+    # shellcheck disable=SC2046
+    systemctl enable --now $(units_for_mode) >/dev/null 2>&1
+    sleep 2
+    echo "FATLLM is on."
+    show_key ;;
+  status)
+    need_root; load
+    for u in $(units_for_mode); do printf '%-14s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || true)"; done
+    echo "mode          ${FATLLM_MODE:-caddy}"
+    base="$(public_base 2>/dev/null || echo '(no tunnel address yet)')"
+    echo "address       $base"
+    if [ "${FATLLM_EXPIRES:-0}" != 0 ]; then
+      echo "expires       $(date -d "@$FATLLM_EXPIRES" '+%Y-%m-%d %H:%M %Z' 2>/dev/null)"
+    else
+      echo "expires       never"
+    fi
+    last="$(tail -n 1 /var/log/fatllm/audit.log 2>/dev/null || true)"
+    echo "last action   ${last:-none}"
+    if [ -n "$base" ] && check "$base"; then echo "self-test     OK"; else echo "self-test     FAILED (see: journalctl -u fatllm -u fatllm-caddy -u fatllm-tunnel -n 50)"; fi ;;
+  log | logs)
+    need_root
+    tail -n "${1:-40}" /var/log/fatllm/audit.log 2>/dev/null || echo "nothing yet" ;;
+  expire)
+    need_root; load
+    v="${1:-}"
+    case "$v" in
+      never | 0) exp=0 ;;
+      *[0-9]m) exp=$(( $(date +%s) + ${v%m} * 60 )) ;;
+      *[0-9]h) exp=$(( $(date +%s) + ${v%h} * 3600 )) ;;
+      *[0-9]d) exp=$(( $(date +%s) + ${v%d} * 86400 )) ;;
+      *) echo "usage: fatllm expire 30m | 12h | 7d | never" >&2; exit 1 ;;
+    esac
+    set_conf FATLLM_EXPIRES "$exp"
+    load; restart_agent
+    if [ "$exp" = 0 ]; then echo "The key never expires."; else echo "The key stops working at $(date -d "@$exp" '+%Y-%m-%d %H:%M %Z')."; fi ;;
+  test)
+    need_root; load
+    base="$(public_base)" || { echo "no address yet"; exit 1; }
+    if check "$base"; then echo "OK: the key works ($base)."; else echo "FAILED. Check: fatllm status"; exit 1; fi ;;
+  update)
+    need_root
+    tmp="$(mktemp -d)"
+    curl -fsSL "$RAW/install.sh" -o "$tmp/install.sh"
+    bash "$tmp/install.sh" --update "$@"
+    rm -rf "$tmp" ;;
+  uninstall | remove)
+    need_root
+    if [ "${1:-}" != "-y" ]; then
+      printf 'Remove FATLLM and its key from this server? Type yes: '
+      read -r ans </dev/tty || ans=""
+      [ "$ans" = yes ] || { echo "Cancelled."; exit 0; }
+    fi
+    systemctl disable --now $UNITS >/dev/null 2>&1 || true
+    for u in $UNITS; do rm -f "/etc/systemd/system/$u.service"; done
+    systemctl daemon-reload
+    rm -rf /opt/fatllm /etc/fatllm "$STATE" /var/log/fatllm
+    rm -f /usr/local/bin/fatllm
+    echo "FATLLM removed. The key no longer works." ;;
+  help | -h | --help)
+    usage ;;
+  *)
+    usage; exit 1 ;;
+esac

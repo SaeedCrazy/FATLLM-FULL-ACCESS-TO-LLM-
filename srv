@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# srv: run commands on your server through its FATLLM key.
+#
+#   srv key <KEY>                  save the key (in ~/.fatllm-key) and test it
+#   srv '<command>'                run a bash command as root, print output + [exit N]
+#   srv - <<'EOF' ... EOF          run a multi-line script from stdin
+#   srv job <id> [wait]            output/status of a command that was still running
+#   srv kill <id>                  stop it
+#   srv jobs                       recent commands
+#   srv get <remote> [local]       download a file (no local name: print it)
+#   srv put <local> <remote> [mode]  upload a file
+#   srv info | guide               server facts | full usage guide
+#
+# The key comes from $FATLLM_KEY, else the built-in key, else ~/.fatllm-key.
+# Env: SRV_WAIT (seconds to wait before handing back a job id, default 50), SRV_CWD.
+# Exit status: the remote command's exit code when it finished.
+set -euo pipefail
+
+BAKED_KEY=""
+KEY_FILE="${FATLLM_KEY_FILE:-$HOME/.fatllm-key}"
+
+die() { echo "srv: $*" >&2; exit 2; }
+
+clean_key() {  # trim spaces, a trailing slash and a pasted /mcp or /srv suffix
+  local k="${1//[[:space:]]/}"
+  k="${k%/}"; k="${k%/mcp}"; k="${k%/srv}"; k="${k%/}"
+  printf '%s' "$k"
+}
+
+get_key() {
+  local k="${FATLLM_KEY:-}"
+  [ -n "$k" ] || k="$BAKED_KEY"
+  [ -n "$k" ] || { [ -s "$KEY_FILE" ] && k="$(cat "$KEY_FILE")"; }
+  [ -n "$k" ] || die "no key. Run: srv key '<the key from fatllm on your server>'"
+  clean_key "$k"
+}
+
+urlenc() {
+  local LC_ALL=C s="$1" out="" c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9.~_/-]) out+="$c" ;;
+      *) out+="$(printf '%%%02X' "'$c")" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# POST a command (from stdin) and print the answer; exit with the remote exit code.
+run_stdin() {
+  local key wait hdr code
+  key="$(get_key)"
+  wait="${SRV_WAIT:-50}"
+  hdr="$(mktemp)"
+  local url="$key/run?wait=$wait"
+  [ -n "${SRV_CWD:-}" ] && url="$url&cwd=$(urlenc "$SRV_CWD")"
+  if ! curl -sS --max-time "$((wait + 60))" -D "$hdr" -H 'Content-Type: text/plain' \
+      --data-binary @- "$url"; then
+    rm -f "$hdr"; die "could not reach the server (network policy? key? 'fatllm status' on the server)"
+  fi
+  code="$(tr -d '\r' < "$hdr" | awk -F': ' 'tolower($1)=="x-exit-code"{print $2}' | tail -1)"
+  rm -f "$hdr"
+  [ -n "$code" ] && exit "$code"
+  exit 0
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  "" | -h | --help | help)
+    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  key)
+    [ -n "${2:-}" ] || die "usage: srv key '<key>'"
+    k="$(clean_key "$2")"
+    [[ "$k" =~ ^https?://[^/]+/fat_[A-Za-z0-9_-]{20,}$ ]] || die "that does not look like a FATLLM key (https://host/fat_...)"
+    umask 077
+    printf '%s\n' "$k" > "$KEY_FILE"
+    echo "key saved in $KEY_FILE"
+    curl -fsS --max-time 20 "$k/info" || die "saved, but the server did not answer"
+    ;;
+  -)
+    run_stdin
+    ;;
+  job)
+    [ -n "${2:-}" ] || die "usage: srv job <id> [wait]"
+    curl -sS --max-time "$(( ${3:-30} + 60 ))" "$(get_key)/job/$2?wait=${3:-30}"
+    ;;
+  kill)
+    [ -n "${2:-}" ] || die "usage: srv kill <id>"
+    curl -sS -X POST "$(get_key)/job/$2/kill"
+    ;;
+  jobs | info | guide)
+    path="$cmd"; [ "$cmd" = guide ] && path=""
+    curl -sS --max-time 30 "$(get_key)/$path"
+    ;;
+  get)
+    [ -n "${2:-}" ] || die "usage: srv get <remote path> [local path]"
+    if [ -n "${3:-}" ]; then
+      curl -fsS "$(get_key)/file?path=$(urlenc "$2")" -o "$3" && echo "saved $3"
+    else
+      curl -sS "$(get_key)/file?path=$(urlenc "$2")"
+    fi
+    ;;
+  put)
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] || die "usage: srv put <local file> <remote path> [mode]"
+    [ -f "$2" ] || die "no such local file: $2"
+    q="path=$(urlenc "$3")"
+    [ -n "${4:-}" ] && q="$q&mode=$4"
+    curl -sS -T "$2" "$(get_key)/file?$q"
+    ;;
+  *)
+    printf '%s' "$*" | run_stdin
+    ;;
+esac

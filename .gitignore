@@ -1,0 +1,5 @@
+# never commit a key
+.fatllm-key
+*.key
+__pycache__/
+*.pyc

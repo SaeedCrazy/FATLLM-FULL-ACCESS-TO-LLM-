@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./srv:*)",
+      "Bash(./srv *)",
+      "Bash(~/srv:*)",
+      "Bash(~/srv *)",
+      "mcp__fatllm"
+    ]
+  }
+}
