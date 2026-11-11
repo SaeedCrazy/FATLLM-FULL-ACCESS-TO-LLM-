@@ -64,18 +64,14 @@ show_key() {
   [ "${FATLLM_EXPIRES:-0}" != 0 ] && exp="$(date -d "@$FATLLM_EXPIRES" '+%Y-%m-%d %H:%M %Z' 2>/dev/null || echo "$FATLLM_EXPIRES")"
   cat <<EOF
 
-=================== FATLLM KEY ===================
-Full root access to this server. Keep it secret.
+==================== FATLLM ====================
+Copy the next line and send it to Claude. That's all.
 
-$key
+FATLLM key: $key
 
-Give it to Claude:
- * Claude Code / any chat: paste the key and say
-   "this is my server's FATLLM key, read it with curl and use it"
- * claude.ai connector URL (Settings > Connectors):
-   $key/mcp
-Expires: $exp
-New key (old stops working): fatllm rotate | Off: fatllm off
+It is full root access to this server: keep it secret.
+(claude.ai connector? use the same key + /mcp)
+Expires: $exp | New key: fatllm rotate | Off: fatllm off
 EOF
   if [ "${FATLLM_MODE:-caddy}" = tunnel ]; then
     echo "Note: tunnel mode. The address changes after a reboot or restart;"

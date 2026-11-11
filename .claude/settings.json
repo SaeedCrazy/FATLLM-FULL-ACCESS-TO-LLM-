@@ -3,9 +3,24 @@
     "allow": [
       "Bash(./srv:*)",
       "Bash(./srv *)",
+      "Bash(srv:*)",
+      "Bash(srv *)",
       "Bash(~/srv:*)",
       "Bash(~/srv *)",
       "mcp__fatllm"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/session-start.sh\"",
+            "timeout": 60
+          }
+        ]
+      }
     ]
   }
 }

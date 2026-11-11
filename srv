@@ -21,9 +21,13 @@ KEY_FILE="${FATLLM_KEY_FILE:-$HOME/.fatllm-key}"
 
 die() { echo "srv: $*" >&2; exit 2; }
 
-clean_key() {  # trim spaces, a trailing slash and a pasted /mcp or /srv suffix
-  local k="${1//[[:space:]]/}"
-  k="${k%/}"; k="${k%/mcp}"; k="${k%/srv}"; k="${k%/}"
+clean_key() {  # the key out of a pasted line ("FATLLM key: https://.../fat_...", maybe + /mcp)
+  local k="$1"
+  if [[ "$k" =~ (https?://[^[:space:]/]+/fat_[A-Za-z0-9_-]+) ]]; then
+    k="${BASH_REMATCH[1]}"
+  else
+    k="${k//[[:space:]]/}"; k="${k%/}"; k="${k%/mcp}"; k="${k%/srv}"; k="${k%/}"
+  fi
   printf '%s' "$k"
 }
 
@@ -72,7 +76,7 @@ case "$cmd" in
     ;;
   key)
     [ -n "${2:-}" ] || die "usage: srv key '<key>'"
-    k="$(clean_key "$2")"
+    shift; k="$(clean_key "$*")"
     [[ "$k" =~ ^https?://[^/]+/fat_[A-Za-z0-9_-]{20,}$ ]] || die "that does not look like a FATLLM key (https://host/fat_...)"
     umask 077
     printf '%s\n' "$k" > "$KEY_FILE"
@@ -90,7 +94,10 @@ case "$cmd" in
     [ -n "${2:-}" ] || die "usage: srv kill <id>"
     curl -sS -X POST "$(get_key)/job/$2/kill"
     ;;
-  jobs | info | guide)
+  info)
+    curl -fsS --max-time 30 "$(get_key)/info" || die "the server did not answer (key wrong or turned off? network policy?)"
+    ;;
+  jobs | guide)
     path="$cmd"; [ "$cmd" = guide ] && path=""
     curl -sS --max-time 30 "$(get_key)/$path"
     ;;

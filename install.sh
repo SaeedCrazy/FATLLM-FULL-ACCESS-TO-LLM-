@@ -13,6 +13,7 @@
 #   --new-key       make a new key even if one exists
 #   --local         use the files next to this script instead of downloading (for development)
 # Running it again repairs/updates the install and keeps the key.
+# Fully automatic: it never asks anything (only sudo may ask for your password).
 set -euo pipefail
 
 RAW="${FATLLM_RAW:-https://raw.githubusercontent.com/SaeedCrazy/FATLLM-FULL-ACCESS-TO-LLM-/HEAD}"
@@ -26,6 +27,16 @@ say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Not root? Run again through sudo, automatically.
+if [ "$(id -u)" != 0 ]; then
+  command -v sudo >/dev/null 2>&1 || die "run as root: type 'su -', then paste the command again"
+  self="${BASH_SOURCE[0]:-}"
+  if [ -n "$self" ] && [ -f "$self" ]; then exec sudo bash "$self" "$@"; fi
+  dl="$(mktemp -d)"
+  curl -fsSL --retry 3 "$RAW/install.sh" -o "$dl/install.sh" || die "download failed: $RAW/install.sh"
+  exec sudo bash "$dl/install.sh" "$@"
+fi
+
 # ------------------------------------------------------------------ options
 DOMAIN="" PORT="" FORCE_TUNNEL=0 EMAIL="" EXPIRE="" NEW_KEY=0 UPDATE=0 LOCAL=0
 while [ $# -gt 0 ]; do
@@ -38,14 +49,13 @@ while [ $# -gt 0 ]; do
     --new-key) NEW_KEY=1; shift ;;
     --update) UPDATE=1; shift ;;
     --local) LOCAL=1; shift ;;
-    -h | --help) sed -n '2,17p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,16p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
 done
 [ -z "$PORT" ] || [[ "$PORT" =~ ^[0-9]+$ ]] || die "--port needs a number"
 
 # ------------------------------------------------------------------ checks
-[ "$(id -u)" = 0 ] || die "run as root (sudo -i, then run the command again)"
 command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || die "this server has no systemd; FATLLM needs it"
 
 case "$(uname -m)" in

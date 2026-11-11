@@ -194,11 +194,25 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout)
         p = subprocess.run([srv, "get", remote], env=env, stdout=subprocess.PIPE, timeout=60)
         self.assertEqual(p.stdout, b"uploaded with spaces")
-        p = subprocess.run([srv, "key", self.base + "/mcp"], env=dict(env, FATLLM_KEY=""),
+        for pasted in (self.base + "/mcp", "FATLLM key: %s\n" % self.base):
+            p = subprocess.run([srv, "key", pasted], env=dict(env, FATLLM_KEY=""),
+                               stdout=subprocess.PIPE, timeout=60)
+            self.assertEqual(p.returncode, 0)
+            with open(os.path.join(self.tmp, ".fatllm-key")) as f:
+                self.assertEqual(f.read().strip(), self.base)
+
+    def test_session_hook(self):
+        hook = os.path.join(ROOT, ".claude", "session-start.sh")
+        env = dict(os.environ, HOME=self.tmp, CLAUDE_PROJECT_DIR=ROOT, NO_PROXY="*", no_proxy="*")
+        p = subprocess.run(["bash", hook], env=dict(env, FATLLM_KEY=self.base),
                            stdout=subprocess.PIPE, timeout=60)
         self.assertEqual(p.returncode, 0)
-        with open(os.path.join(self.tmp, ".fatllm-key")) as f:
-            self.assertEqual(f.read().strip(), self.base)
+        self.assertIn(b"connected", p.stdout)
+        self.assertIn(b"hostname", p.stdout)
+        p = subprocess.run(["bash", hook], env=dict(env, FATLLM_KEY=self.base.replace("fat_", "fat_x")),
+                           stdout=subprocess.PIPE, timeout=60)
+        self.assertEqual(p.returncode, 0)
+        self.assertIn(b"did not answer", p.stdout)
 
     # --- MCP
 

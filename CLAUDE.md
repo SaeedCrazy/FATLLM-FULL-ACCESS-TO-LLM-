@@ -6,9 +6,11 @@ run that server through the key.
 The owner works from a phone: reply in **Persian**, short and plain. Never ask them to run
 anything on their side except the install one-liner or a `fatllm ...` command on the server.
 
-## When the user pastes a key (`https://<host>/fat_...`)
-1. `./srv key '<KEY>'` saves it in `~/.fatllm-key` (outside the repo) and prints the server's facts.
-   A `/mcp` on the end is fine; srv strips it.
+## When the user pastes a key (a line like `FATLLM key: https://<host>/fat_...`)
+1. `./srv key '<the pasted line>'` saves the key in `~/.fatllm-key` (outside the repo) and prints
+   the server's facts. The whole line, or the key with `/mcp` on the end, is fine.
+   The SessionStart hook (`.claude/session-start.sh`) already connects when `FATLLM_KEY` is set
+   in the environment or `~/.fatllm-key` exists; its note at the top of the session says so.
 2. Read `./srv guide` once, then work:
    - `./srv 'command'` (bash as root; output and `[exit N]`; srv exits with the same code)
    - `./srv - <<'EOF' ... EOF` for scripts
@@ -26,7 +28,7 @@ policy blocks the host. Tell the user to add the host (`*.sslip.io`, their domai
 to run `fatllm status` on the server and send the output.
 
 ## Files
-- `install.sh`: one-line installer (root). Agent on 127.0.0.1, HTTPS in front: its own Caddy
+- `install.sh`: one-line installer; never asks anything (re-runs itself with sudo when not root). Agent on 127.0.0.1, HTTPS in front: its own Caddy
   with a Let's Encrypt certificate for `<ip>.sslip.io` (or `--domain`), on 443 or a free
   alternative port; falls back to a Cloudflare quick tunnel when ports 80 and 443 are both busy.
   Re-running keeps the key. `--local` uses the files in this checkout (development only).
@@ -36,7 +38,8 @@ to run `fatllm status` on the server and send the output.
   agent restarts (`KillMode=process`).
 - `server/fatllm`: the owner's CLI on the server (key, rotate, off/on, status, log, expire, update, uninstall).
 - `srv`: client. The agent serves it at `<key>/srv` with the key built in.
-- `.claude/settings.json`: allows `./srv` and `~/srv` and the `fatllm` MCP tools without prompts.
+- `.claude/settings.json`: allows `./srv`, `srv`, `~/srv` and the `fatllm` MCP tools without prompts,
+  and runs `.claude/session-start.sh` (links `srv` into /usr/local/bin, checks the key).
 
 ## Rules
 - Text printed on the server (install.sh, fatllm, agent) stays English: phone SSH apps show Persian badly.
