@@ -19,8 +19,14 @@ set -euo pipefail
 
 BAKED_KEY=""
 KEY_FILE="${FATLLM_KEY_FILE:-$HOME/.fatllm-key}"
+CERT_FILE="${FATLLM_CERT_FILE:-$HOME/.fatllm-cert}"   # pinned self-signed cert (direct mode)
 
 die() { echo "srv: $*" >&2; exit 2; }
+
+# curl, trusting the pinned cert when there is one (self-signed "direct" servers).
+TLS=()
+[ -s "$CERT_FILE" ] && TLS=(--cacert "$CERT_FILE")
+rc() { if [ "${#TLS[@]}" -gt 0 ]; then curl "${TLS[@]}" "$@"; else curl "$@"; fi; }
 
 clean_key() {  # the key out of a pasted line ("FATLLM key: https://.../fat_...", maybe + /mcp)
   local k="$1"
@@ -61,7 +67,7 @@ run_stdin() {
   local url="$key/run?wait=$wait"
   [ -n "${SRV_CWD:-}" ] && url="$url&cwd=$(urlenc "$SRV_CWD")"
   [ -n "${VIA:-}" ] && url="$url&via=$(urlenc "$VIA")"
-  if ! curl -sS --max-time "$((wait + 60))" -D "$hdr" -H 'Content-Type: text/plain' \
+  if ! rc -sS --max-time "$((wait + 60))" -D "$hdr" -H 'Content-Type: text/plain' \
       --data-binary @- "$url"; then
     rm -f "$hdr"; die "could not reach the server (network policy? key? 'fatllm status' on the server)"
   fi
@@ -80,41 +86,55 @@ fi
 cmd="${1:-}"
 case "$cmd" in
   "" | -h | --help | help)
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   key)
     [ -n "${2:-}" ] || die "usage: srv key '<key>'"
     shift; k="$(clean_key "$*")"
     [[ "$k" =~ ^https?://[^/]+/fat_[A-Za-z0-9_-]{20,}$ ]] || die "that does not look like a FATLLM key (https://host/fat_...)"
     umask 077
+    rm -f "$CERT_FILE"; TLS=()
+    if ! curl -fsS --max-time 20 "$k/info" >/dev/null 2>&1; then
+      # Not a publicly-trusted certificate: maybe a self-signed "direct" server. Pin its cert.
+      hp="${k#*://}"; hp="${hp%%/*}"; khost="${hp%%:*}"; kport="${hp##*:}"; [ "$kport" = "$khost" ] && kport=443
+      if command -v openssl >/dev/null 2>&1; then
+        printf '' | openssl s_client -connect "$khost:$kport" -servername "$khost" 2>/dev/null \
+          | openssl x509 -outform pem > "$CERT_FILE" 2>/dev/null || true
+      fi
+      if [ -s "$CERT_FILE" ] && curl -fsS --max-time 20 --cacert "$CERT_FILE" "$k/info" >/dev/null 2>&1; then
+        TLS=(--cacert "$CERT_FILE"); echo "self-signed certificate pinned ($CERT_FILE)"
+      else
+        rm -f "$CERT_FILE"; die "the server did not answer, or its certificate could not be trusted (network policy? 'fatllm status' on the server?)"
+      fi
+    fi
     printf '%s\n' "$k" > "$KEY_FILE"
     echo "key saved in $KEY_FILE"
-    curl -fsS --max-time 20 "$k/info" || die "saved, but the server did not answer"
+    rc -fsS --max-time 20 "$k/info" || die "saved, but the server did not answer"
     ;;
   -)
     run_stdin
     ;;
   job)
     [ -n "${2:-}" ] || die "usage: srv job <id> [wait]"
-    curl -sS --max-time "$(( ${3:-30} + 60 ))" "$(get_key)/job/$2?wait=${3:-30}"
+    rc -sS --max-time "$(( ${3:-30} + 60 ))" "$(get_key)/job/$2?wait=${3:-30}"
     ;;
   kill)
     [ -n "${2:-}" ] || die "usage: srv kill <id>"
-    curl -sS -X POST "$(get_key)/job/$2/kill"
+    rc -sS -X POST "$(get_key)/job/$2/kill"
     ;;
   info)
-    curl -fsS --max-time 30 "$(get_key)/info" || die "the server did not answer (key wrong or turned off? network policy?)"
+    rc -fsS --max-time 30 "$(get_key)/info" || die "the server did not answer (key wrong or turned off? network policy?)"
     ;;
   jobs | guide)
     path="$cmd"; [ "$cmd" = guide ] && path=""
-    curl -sS --max-time 30 "$(get_key)/$path"
+    rc -sS --max-time 30 "$(get_key)/$path"
     ;;
   get)
     [ -n "${2:-}" ] || die "usage: srv get <remote path> [local path]"
     if [ -n "${3:-}" ]; then
-      curl -fsS "$(get_key)/file?path=$(urlenc "$2")" -o "$3" && echo "saved $3"
+      rc -fsS "$(get_key)/file?path=$(urlenc "$2")" -o "$3" && echo "saved $3"
     else
-      curl -sS "$(get_key)/file?path=$(urlenc "$2")"
+      rc -sS "$(get_key)/file?path=$(urlenc "$2")"
     fi
     ;;
   put)
@@ -122,7 +142,7 @@ case "$cmd" in
     [ -f "$2" ] || die "no such local file: $2"
     q="path=$(urlenc "$3")"
     [ -n "${4:-}" ] && q="$q&mode=$4"
-    curl -sS -T "$2" "$(get_key)/file?$q"
+    rc -sS -T "$2" "$(get_key)/file?$q"
     ;;
   *)
     printf '%s' "$*" | run_stdin

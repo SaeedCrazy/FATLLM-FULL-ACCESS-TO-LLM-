@@ -20,9 +20,15 @@ fatllm - full server access for Claude
   fatllm log [N]        last N things Claude did (default 40)
   fatllm expire <time>  key stops working after 30m / 12h / 7d, or "never"
   fatllm test           check the key works from this server
+  fatllm mode <m>       switch how it is reachable: caddy | direct | tunnel
   fatllm relay ...       chain another server (see: fatllm relay)
   fatllm update         update FATLLM, keep the key
   fatllm uninstall      remove everything
+
+  Modes: caddy = real HTTPS certificate on a port (needs port 80 or 443 free);
+         direct = the agent serves HTTPS itself with a self-signed cert on a
+                  stable port (works when 80/443 are busy; Claude Code only);
+         tunnel = Cloudflare quick tunnel (address changes on restart).
 EOF
 }
 
@@ -254,15 +260,20 @@ Expires: $exp | New key: fatllm rotate | Off: fatllm off
 EOF
   if [ "${FATLLM_MODE:-caddy}" = tunnel ]; then
     echo "Note: tunnel mode. The address changes after a reboot or restart;"
-    echo "      run 'fatllm key' again then."
+    echo "      run 'fatllm key' again then. For a stable address: fatllm mode direct"
+  elif [ "${FATLLM_MODE:-caddy}" = direct ]; then
+    echo "Note: self-signed HTTPS. Claude Code (srv) trusts it automatically."
+    echo "      The claude.ai website connector needs a public cert (fatllm mode caddy / --domain)."
   fi
   echo "=================================================="
 }
 
 check() {
-  local base="$1" url
+  local base="$1" url mode="${FATLLM_MODE:-caddy}"
   url="$base/$FATLLM_TOKEN/info"
-  if [ "${FATLLM_MODE:-caddy}" = caddy ]; then
+  if [ "$mode" = direct ]; then
+    curl -fsS --insecure --noproxy '*' --max-time 10 "https://127.0.0.1:${FATLLM_PORT:-443}/$FATLLM_TOKEN/info" >/dev/null 2>&1
+  elif [ "$mode" = caddy ]; then
     local hp="${base#https://}" host port
     host="${hp%%:*}"; port=443
     [ "$hp" != "$host" ] && port="${hp##*:}"
@@ -348,6 +359,20 @@ case "$cmd" in
       help | -h | --help) relay_usage ;;
       *) relay_usage; exit 1 ;;
     esac ;;
+  mode)
+    need_root
+    m="${1:-}"; [ $# -gt 0 ] && shift
+    case "$m" in
+      caddy) flag="" ;;
+      direct | selfsigned) flag="--direct" ;;
+      tunnel) flag="--tunnel" ;;
+      *) echo "usage: fatllm mode caddy|direct|tunnel [--port N] [--domain NAME]" >&2; exit 1 ;;
+    esac
+    tmp="$(mktemp -d)"
+    curl -fsSL "$RAW/install.sh" -o "$tmp/install.sh" || { echo "download failed" >&2; exit 1; }
+    # shellcheck disable=SC2086
+    bash "$tmp/install.sh" $flag "$@"
+    rm -rf "$tmp" ;;
   update)
     need_root
     tmp="$(mktemp -d)"

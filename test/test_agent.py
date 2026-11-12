@@ -311,5 +311,66 @@ class AgentTest(unittest.TestCase):
         self.assertNotIn(TOKEN, log)
 
 
+class DirectTLSTest(unittest.TestCase):
+    """The agent serving HTTPS itself with a self-signed cert, and srv pinning it (direct mode)."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not shutil.which("openssl"):
+            raise unittest.SkipTest("openssl not available")
+        cls.tmp = tempfile.mkdtemp()
+        cls.port = free_port()
+        crt = os.path.join(cls.tmp, "cert.pem")
+        key = os.path.join(cls.tmp, "key.pem")
+        cfg = os.path.join(cls.tmp, "openssl.cnf")
+        with open(cfg, "w") as f:
+            f.write("[req]\ndistinguished_name=dn\nx509_extensions=v3\nprompt=no\n"
+                    "[dn]\nCN=localhost\n[v3]\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n")
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                        "-keyout", key, "-out", crt, "-days", "3650", "-config", cfg],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        env = dict(os.environ, FATLLM_TOKEN=TOKEN, FATLLM_LOCAL_PORT=str(cls.port),
+                   FATLLM_LISTEN="127.0.0.1", FATLLM_TLS_CERT=crt, FATLLM_TLS_KEY=key,
+                   FATLLM_STATE_DIR=os.path.join(cls.tmp, "state"),
+                   FATLLM_LOG_DIR=os.path.join(cls.tmp, "log"),
+                   FATLLM_CLIENT=os.path.join(ROOT, "srv"))
+        cls.proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "server", "agent.py")],
+                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        cls.base = "https://localhost:%d/%s" % (cls.port, TOKEN)
+        ctx = __import__("ssl").SSLContext(__import__("ssl").PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = __import__("ssl").CERT_NONE
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(cls.base + "/info", timeout=1, context=ctx)
+                break
+            except urllib.error.HTTPError:
+                break
+            except Exception:
+                time.sleep(0.1)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.proc.terminate()
+        cls.proc.wait(5)
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_srv_pins_selfsigned_and_runs(self):
+        home = tempfile.mkdtemp()
+        try:
+            env = dict(os.environ, HOME=home, NO_PROXY="*", no_proxy="*", FATLLM_KEY="")
+            srv = os.path.join(ROOT, "srv")
+            p = subprocess.run([srv, "key", self.base], env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+            self.assertEqual(p.returncode, 0, p.stdout)
+            self.assertIn(b"pinned", p.stdout)
+            self.assertTrue(os.path.exists(os.path.join(home, ".fatllm-cert")))
+            p = subprocess.run([srv, "echo tls-ok; exit 7"], env=env, stdout=subprocess.PIPE, timeout=60)
+            self.assertIn(b"tls-ok", p.stdout)
+            self.assertEqual(p.returncode, 7)
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

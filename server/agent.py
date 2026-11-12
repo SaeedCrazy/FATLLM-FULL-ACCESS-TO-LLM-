@@ -52,6 +52,8 @@ EXPIRES = int(os.environ.get("FATLLM_EXPIRES", "0") or 0)
 CLIENT_SCRIPT = os.environ.get(
     "FATLLM_CLIENT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "srv"))
 RELAY_DIR = os.environ.get("FATLLM_RELAY_DIR", "/etc/fatllm/relays")
+TLS_CERT = os.environ.get("FATLLM_TLS_CERT", "").strip()
+TLS_KEY = os.environ.get("FATLLM_TLS_KEY", "").strip()
 
 JOBS_DIR = os.path.join(STATE_DIR, "jobs")
 AUDIT_LOG = os.path.join(LOG_DIR, "audit.log")
@@ -1106,7 +1108,18 @@ def main():
     family = socket.AF_INET6 if ":" in LISTEN else socket.AF_INET
     Server.address_family = family
     httpd = Server((LISTEN, PORT), Handler)
-    print("fatllm %s listening on %s:%d (mode %s)" % (VERSION, LISTEN, PORT, MODE), flush=True)
+    scheme = "http"
+    if TLS_CERT and TLS_KEY:
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+        try:
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        except (AttributeError, ValueError):
+            pass
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        scheme = "https"
+    print("fatllm %s listening on %s %s:%d (mode %s)" % (VERSION, scheme, LISTEN, PORT, MODE), flush=True)
     signal.signal(signal.SIGTERM, lambda *_: (httpd.server_close(), sys.exit(0)))
     httpd.serve_forever()
 

@@ -39,10 +39,24 @@ policy blocks the host. Tell the user to add the host (`*.sslip.io`, their domai
 `*.trycloudflare.com`) under Allowed domains, or set Network access to Full. Otherwise ask them
 to run `fatllm status` on the server and send the output.
 
+## Reachability modes (and the Cloudflare 1033 / changing-address problem)
+Three ways the key's address is served, chosen at install and switchable with `fatllm mode <m>`:
+- `caddy`: Caddy gets a real Let's Encrypt cert for `<ip>.sslip.io` (or `--domain`) on 443 or a
+  free alt port. Needs port 80 or 443 free. Works with the claude.ai connector. Stable address.
+- `direct`: the agent serves HTTPS itself with a long-lived self-signed cert on a stable port
+  (agent env `FATLLM_TLS_CERT`/`FATLLM_TLS_KEY`, binds `0.0.0.0`). No port 80/443 or Cloudflare
+  needed; works from Iran. `srv` trusts it by pinning the cert on `srv key` (TOFU → `~/.fatllm-cert`,
+  used as `--cacert`). The claude.ai website connector will NOT trust it (needs a public cert).
+- `tunnel`: Cloudflare quick tunnel. Last resort — the address changes on every restart (so a saved
+  key goes stale) and can show Cloudflare error 1033 when the tunnel drops.
+If a user reports error 1033 or an address that keeps changing, tell them to run `fatllm mode direct`
+on the server (stable, Claude-Code-friendly), or `fatllm mode caddy` / `--domain` if they need the
+claude.ai connector.
+
 ## Files
-- `install.sh`: one-line installer; never asks anything (re-runs itself with sudo when not root). Agent on 127.0.0.1, HTTPS in front: its own Caddy
-  with a Let's Encrypt certificate for `<ip>.sslip.io` (or `--domain`), on 443 or a free
-  alternative port; falls back to a Cloudflare quick tunnel when ports 80 and 443 are both busy.
+- `install.sh`: one-line installer; never asks anything (re-runs itself with sudo when not root).
+  Picks a mode automatically: caddy if it can get a public cert, else direct self-signed (stable),
+  else tunnel. `--direct`/`--tunnel`/`--domain`/`--port` force a choice.
   Re-running keeps the key. `--local` uses the files in this checkout (development only).
 - `server/agent.py`: the agent (Python 3.6+, standard library only). HTTP endpoints and an MCP
   server; see its docstring. Token in the first path segment or `Authorization: Bearer`.

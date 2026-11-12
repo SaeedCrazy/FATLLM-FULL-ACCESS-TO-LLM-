@@ -7,7 +7,10 @@
 # Options (after the command: bash <(curl ...) --domain my.example.com):
 #   --domain NAME   use your own domain (its DNS A record must point to this server)
 #   --port N        HTTPS port (default 443 if free, else 8443, 2053, 2083, 2087, 2096, 9443)
-#   --tunnel        use a Cloudflare quick tunnel instead (no open port, no domain needed)
+#   --direct        serve HTTPS from the agent itself with a self-signed cert on a free port
+#                   (stable address, no port 80/443 or Cloudflare needed; works with Claude Code,
+#                   not with the claude.ai connector which needs a public certificate)
+#   --tunnel        use a Cloudflare quick tunnel instead (no open port; address changes on restart)
 #   --email ADDR    e-mail for the Let's Encrypt account (optional)
 #   --expire T      the key stops working after T (30m, 12h, 7d)
 #   --new-key       make a new key even if one exists
@@ -38,18 +41,19 @@ if [ "$(id -u)" != 0 ]; then
 fi
 
 # ------------------------------------------------------------------ options
-DOMAIN="" PORT="" FORCE_TUNNEL=0 EMAIL="" EXPIRE="" NEW_KEY=0 UPDATE=0 LOCAL=0
+DOMAIN="" PORT="" FORCE_TUNNEL=0 FORCE_DIRECT=0 EMAIL="" EXPIRE="" NEW_KEY=0 UPDATE=0 LOCAL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN="${2:-}"; shift 2 ;;
     --port) PORT="${2:-}"; shift 2 ;;
     --tunnel) FORCE_TUNNEL=1; shift ;;
+    --direct | --selfsigned) FORCE_DIRECT=1; shift ;;
     --email) EMAIL="${2:-}"; shift 2 ;;
     --expire) EXPIRE="${2:-}"; shift 2 ;;
     --new-key) NEW_KEY=1; shift ;;
     --update) UPDATE=1; shift ;;
     --local) LOCAL=1; shift ;;
-    -h | --help) sed -n '2,16p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,19p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
 done
@@ -174,6 +178,9 @@ if [ -n "$EXPIRE" ]; then
 fi
 [ -n "$EMAIL" ] || EMAIL="$OLD_EMAIL"
 
+# Extra conf fields, set by setup_direct (empty for caddy/tunnel = agent on 127.0.0.1, no TLS).
+CONF_LISTEN="" CONF_TLS_CERT="" CONF_TLS_KEY=""
+
 write_conf() {  # mode host port public_url
   umask 077
   cat > "$CONF" <<EOF
@@ -184,10 +191,14 @@ FATLLM_HOST=$2
 FATLLM_PORT=$3
 FATLLM_PUBLIC_URL=$4
 FATLLM_LOCAL_PORT=$LOCAL_PORT
+FATLLM_LISTEN=$CONF_LISTEN
+FATLLM_TLS_CERT=$CONF_TLS_CERT
+FATLLM_TLS_KEY=$CONF_TLS_KEY
 FATLLM_EXPIRES=$EXPIRES
 FATLLM_EMAIL=$EMAIL
 FATLLM_STATE_DIR=$STATE
 FATLLM_LOG_DIR=$LOGS
+FATLLM_RELAY_DIR=$CONF_DIR/relays
 FATLLM_CLIENT=$APP/srv
 EOF
   chmod 600 "$CONF"
@@ -201,6 +212,7 @@ cat > /etc/systemd/system/fatllm.service <<EOF
 Description=FATLLM agent (shell access for an AI assistant)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 EnvironmentFile=$CONF
@@ -363,6 +375,57 @@ EOF
   return 1
 }
 
+setup_direct() {  # 0 = the agent serves HTTPS itself with a self-signed cert on a stable port
+  local ip host pub url crt key san cfg
+  ip="$(public_ip || true)"
+  if [ -n "$DOMAIN" ]; then host="$DOMAIN"
+  elif [ -n "$OLD_HOST" ] && [ "$OLD_MODE" = direct ]; then host="$OLD_HOST"
+  elif [ -n "$ip" ] && ! is_private "$ip"; then host="${ip//./-}.sslip.io"
+  else warn "could not find this server's public IPv4"; return 1; fi
+  command -v openssl >/dev/null 2>&1 || pkg_install openssl || { warn "openssl is needed for a self-signed certificate"; return 1; }
+
+  if [ -n "$PORT" ]; then pub="$PORT"; port_free "$pub" || { warn "port $pub is already in use"; return 1; }
+  elif [ -n "$OLD_PORT" ] && [ "$OLD_MODE" = direct ] && port_free "$OLD_PORT"; then pub="$OLD_PORT"
+  else pub=""; for p in 8443 2053 2083 2087 2096 9443 443; do port_free "$p" && { pub="$p"; break; }; done; fi
+  [ -n "$pub" ] || { warn "no free HTTPS port"; return 1; }
+
+  say "Making a self-signed certificate for $host"
+  mkdir -p "$STATE/tls"; chmod 700 "$STATE/tls"
+  crt="$STATE/tls/cert.pem"; key="$STATE/tls/key.pem"
+  san="DNS:$host"; [ -n "$ip" ] && san="$san,IP:$ip"
+  cfg="$TMP/openssl.cnf"
+  cat > "$cfg" <<CFG
+[req]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+[dn]
+CN = $host
+[v3]
+subjectAltName = $san
+CFG
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$key" -out "$crt" -days 3650 -config "$cfg" >/dev/null 2>&1 \
+    || { warn "openssl could not make a certificate"; return 1; }
+  chmod 600 "$key" "$crt"
+
+  url="https://$host"; [ "$pub" = 443 ] || url="$url:$pub"
+  say "Serving HTTPS directly on $url (self-signed)"
+  systemctl disable --now fatllm-caddy fatllm-tunnel >/dev/null 2>&1 || true
+  LOCAL_PORT="$pub"; CONF_LISTEN="0.0.0.0"; CONF_TLS_CERT="$crt"; CONF_TLS_KEY="$key"
+  write_conf direct "$host" "$pub" "$url"
+  open_port "$pub"
+  systemctl restart fatllm
+  local ok=0
+  for _ in $(seq 1 20); do
+    if curl -fsS --insecure --noproxy '*' --max-time 5 "https://127.0.0.1:$pub/$TOKEN/info" >/dev/null 2>&1; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ "$ok" = 1 ] && return 0
+  journalctl -u fatllm -n 15 --no-pager >&2 2>/dev/null || true
+  warn "the agent did not come up with TLS"
+  return 1
+}
+
 setup_tunnel() {
   get_cloudflared || { warn "could not download cloudflared"; return 1; }
   say "Starting a Cloudflare quick tunnel"
@@ -371,9 +434,10 @@ setup_tunnel() {
 Description=FATLLM tunnel (Cloudflare quick tunnel)
 After=network-online.target fatllm.service
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
-ExecStart=/bin/sh -c 'exec $APP/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:$LOCAL_PORT > $STATE/tunnel.log 2>&1'
+ExecStart=/bin/sh -c 'exec $APP/cloudflared tunnel --no-autoupdate --retries 5 --url http://127.0.0.1:$LOCAL_PORT > $STATE/tunnel.log 2>&1'
 Restart=always
 RestartSec=5
 
@@ -401,18 +465,30 @@ EOF
   return 0
 }
 
-if [ "$FORCE_TUNNEL" = 1 ] || { [ "$OLD_MODE" = tunnel ] && [ "$UPDATE" = 1 ] && [ -z "$DOMAIN$PORT" ]; }; then
-  setup_tunnel || die "the tunnel did not start. Check internet access to Cloudflare, or try without --tunnel."
+if [ "$FORCE_TUNNEL" = 1 ] || { [ "$OLD_MODE" = tunnel ] && [ "$UPDATE" = 1 ] && [ "$FORCE_DIRECT" = 0 ] && [ -z "$DOMAIN$PORT" ]; }; then
+  setup_tunnel || die "the tunnel did not start. Check internet access to Cloudflare, or try --direct."
+elif [ "$FORCE_DIRECT" = 1 ] || { [ "$OLD_MODE" = direct ] && [ "$UPDATE" = 1 ] && [ "$FORCE_TUNNEL" = 0 ]; }; then
+  setup_direct || die "direct HTTPS did not work (see above). Try --domain with a real DNS name, or --tunnel."
 elif ! setup_caddy; then
-  if [ -n "$DOMAIN$PORT" ]; then
-    die "HTTPS with your --domain/--port did not work (see above). Fix it, or use --tunnel."
+  if [ -n "$DOMAIN" ]; then
+    die "HTTPS for --domain $DOMAIN did not work (see above). Fix its DNS/ports, or use --direct or --tunnel."
   fi
-  warn "Falling back to a Cloudflare quick tunnel (no open port needed)."
-  setup_tunnel || die "neither HTTPS nor the tunnel worked. Free port 80 or 443, or use --domain, then run this again."
+  warn "A public certificate isn't possible here (ports 80 and 443 busy, or the host is unreachable)."
+  warn "Using direct self-signed HTTPS instead: a stable address that works with Claude Code."
+  setup_direct || {
+    warn "Direct HTTPS failed too; trying a Cloudflare tunnel as a last resort."
+    setup_tunnel || die "nothing worked. Free port 80 or 443, or pass --domain, then run this again."
+  }
 fi
 
 say "Done."
 fatllm key
-if grep -q '^FATLLM_MODE=caddy' "$CONF" && ! grep -q '^FATLLM_PORT=443$' "$CONF"; then
-  echo "If Claude cannot connect, open TCP port $(sed -n 's/^FATLLM_PORT=//p' "$CONF") in your cloud provider's firewall."
+mode_now="$(sed -n 's/^FATLLM_MODE=//p' "$CONF")"
+port_now="$(sed -n 's/^FATLLM_PORT=//p' "$CONF")"
+if { [ "$mode_now" = caddy ] || [ "$mode_now" = direct ]; } && [ "$port_now" != 443 ] && [ -n "$port_now" ]; then
+  echo "If Claude cannot connect, open TCP port $port_now in your cloud provider's firewall (Hetzner/Arvan/etc.)."
+fi
+if [ "$mode_now" = direct ]; then
+  echo "This is a self-signed certificate: Claude Code (srv) trusts it automatically."
+  echo "The claude.ai website connector needs a public certificate; for that use --domain or --tunnel."
 fi
