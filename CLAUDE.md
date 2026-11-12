@@ -13,6 +13,7 @@ anything on their side except the install one-liner or a `fatllm ...` command on
    in the environment or `~/.fatllm-key` exists; its note at the top of the session says so.
 2. Read `./srv guide` once, then work:
    - `./srv 'command'` (bash as root; output and `[exit N]`; srv exits with the same code)
+   - `./srv --via <relay> 'command'` routes that command's network through a relay (see below)
    - `./srv - <<'EOF' ... EOF` for scripts
    - `./srv job <id>` when a command was still running (it keeps running on the server)
    - `./srv get <remote> [local]`, `./srv put <local> <remote> [mode]`, `./srv info`
@@ -20,6 +21,17 @@ anything on their side except the install one-liner or a `fatllm ...` command on
    work. Ask first only before unrecoverable data loss, or before something that could lock
    them out (SSH, firewall, network config: keep their current SSH access working).
 4. Never print the full key back, never write it into the repo, never commit it.
+
+## Relays (reaching sites a server can't reach itself)
+A relay sends a command's network out through another server. `srv info` and `./srv guide` list
+the configured relays by name. Use `./srv --via <name> 'curl -s https://site'` when the target is
+blocked from the FATLLM server itself:
+- Iranian sites (Mixin, Iranian gateways) block foreign IPs → use the relay that exits in Iran.
+- Sites blocked from inside Iran (Telegram, AI, GitHub) → run WITHOUT `via` if FATLLM is on a
+  foreign server, or `via` the foreign relay if FATLLM is on the Iranian server.
+The owner adds relays with `fatllm relay add --host <ip> --user root --name <name>` on the server
+(it installs an SSH key, used once; the password is never stored). Only the owner does this — do
+not ask for another server's root password in chat; point them to that command.
 
 If the key is in the environment as `FATLLM_KEY`, srv uses it; no paste is needed.
 If srv cannot reach the server: a 403 from the proxy means the cloud environment's network

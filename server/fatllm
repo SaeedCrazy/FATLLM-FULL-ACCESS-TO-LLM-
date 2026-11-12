@@ -4,6 +4,7 @@ set -euo pipefail
 
 CONF=/etc/fatllm/fatllm.env
 STATE=/var/lib/fatllm
+RELAY_DIR="${FATLLM_RELAY_DIR:-/etc/fatllm/relays}"
 RAW="${FATLLM_RAW:-https://raw.githubusercontent.com/SaeedCrazy/FATLLM-FULL-ACCESS-TO-LLM-/HEAD}"
 UNITS="fatllm fatllm-caddy fatllm-tunnel"
 
@@ -19,9 +20,187 @@ fatllm - full server access for Claude
   fatllm log [N]        last N things Claude did (default 40)
   fatllm expire <time>  key stops working after 30m / 12h / 7d, or "never"
   fatllm test           check the key works from this server
+  fatllm relay ...       chain another server (see: fatllm relay)
   fatllm update         update FATLLM, keep the key
   fatllm uninstall      remove everything
 EOF
+}
+
+relay_usage() {
+  cat <<'EOF'
+fatllm relay - chain another server so Claude can reach sites this one can't.
+
+  fatllm relay add --host <ip> [--user root] [--port 22] [--name iran]
+                        connect another server; Claude then runs commands
+                        "via" it:  srv --via iran 'curl -s https://site'
+                        Password (used once, NOT stored): typed hidden when asked,
+                        or piped in:  echo 'PASS' | fatllm relay add --host <ip>
+                        A key is made and installed; after that no password is used.
+  fatllm relay list     show the relays and whether each tunnel is up
+  fatllm relay test <name>   show this server's IP vs the IP traffic exits from
+  fatllm relay remove <name> remove a relay
+
+Typical: FATLLM on your foreign server + a relay to your Iranian server, so
+Iranian sites are reached "via" the Iranian one and everything else directly.
+EOF
+}
+
+json_get() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],""))' "$1" "$2" 2>/dev/null; }
+
+relay_units() {
+  local f n out=""
+  for f in "$RELAY_DIR"/*.json; do
+    [ -e "$f" ] || continue
+    n="$(basename "$f" .json)"
+    out="$out fatllm-relay-$n"
+  done
+  echo "$out"
+}
+
+relay_pkgs() {
+  command -v ssh >/dev/null 2>&1 && command -v ssh-keygen >/dev/null 2>&1 && return 0
+  local need="openssh-client"
+  if command -v apt-get >/dev/null 2>&1; then apt-get update -qq >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-client sshpass >/dev/null 2>&1 || true
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y -q openssh-clients sshpass >/dev/null 2>&1 || true
+  elif command -v yum >/dev/null 2>&1; then yum install -y -q openssh-clients sshpass >/dev/null 2>&1 || true
+  elif command -v apk >/dev/null 2>&1; then apk add -q openssh-client sshpass >/dev/null 2>&1 || true
+  fi
+  command -v ssh >/dev/null 2>&1 || { echo "could not install the ssh client" >&2; return 1; }
+  : "$need"
+}
+
+free_socks_port() {
+  python3 - "$RELAY_DIR" <<'PY'
+import glob, json, os, socket, sys
+used = set()
+for f in glob.glob(os.path.join(sys.argv[1], "*.json")):
+    try:
+        used.add(int(json.load(open(f)).get("socks_port", 0)))
+    except Exception:
+        pass
+for p in range(1080, 1200):
+    if p in used:
+        continue
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", p)); s.close(); print(p); break
+    except OSError:
+        s.close()
+PY
+}
+
+relay_add() {
+  local host="" user=root port=22 name="" pass=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --host) host="${2:-}"; shift 2 ;;
+      --user) user="${2:-}"; shift 2 ;;
+      --port) port="${2:-}"; shift 2 ;;
+      --name) name="${2:-}"; shift 2 ;;
+      *) echo "relay add: unknown option $1" >&2; relay_usage; return 1 ;;
+    esac
+  done
+  [ -n "$host" ] || { relay_usage; return 1; }
+  [[ "$port" =~ ^[0-9]+$ ]] || { echo "--port must be a number" >&2; return 1; }
+  [ -n "$name" ] || name="$(printf '%s' "$host" | tr -c 'a-zA-Z0-9' '-' | sed 's/^-*//; s/-*$//')"
+  [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "name may use letters, digits, - and _ only" >&2; return 1; }
+
+  # Password: env RELAY_PASSWORD, else piped stdin, else hidden prompt. Used once, never stored.
+  if [ -n "${RELAY_PASSWORD:-}" ]; then pass="$RELAY_PASSWORD"
+  elif [ ! -t 0 ]; then pass="$(cat)"; pass="${pass%$'\n'}"
+  else printf 'Root password of %s@%s (hidden, used once, NOT stored): ' "$user" "$host"; read -rs pass </dev/tty || true; echo; fi
+
+  relay_pkgs || return 1
+  mkdir -p "$RELAY_DIR"; chmod 700 "$RELAY_DIR"
+  local key="$RELAY_DIR/$name.key" kh="$RELAY_DIR/known_hosts"
+  [ -f "$key" ] || ssh-keygen -t ed25519 -N '' -C "fatllm-relay-$name" -f "$key" -q
+  chmod 600 "$key"
+  local sshopt=(-o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$kh" -o ConnectTimeout=20 -p "$port")
+
+  if [ -n "$pass" ]; then
+    command -v sshpass >/dev/null 2>&1 || { echo "sshpass is not available; install it or add the key below manually:" >&2; cat "$key.pub"; return 1; }
+    echo "Installing the access key on $host ..."
+    local pub; pub="$(cat "$key.pub")"
+    if ! sshpass -p "$pass" ssh "${sshopt[@]}" "$user@$host" \
+        "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; grep -qxF '$pub' ~/.ssh/authorized_keys || printf '%s\n' '$pub' >> ~/.ssh/authorized_keys" 2>/dev/null; then
+      echo "Could not log in with that password (host/user/port/password?)." >&2; return 1
+    fi
+    pass=""; unset RELAY_PASSWORD
+  fi
+
+  echo "Testing the key login ..."
+  if ! ssh -o BatchMode=yes "${sshopt[@]}" -i "$key" "$user@$host" 'echo FATLLM_RELAY_OK' 2>/dev/null | grep -q FATLLM_RELAY_OK; then
+    echo "Key login failed. Add this key to $user@$host (~/.ssh/authorized_keys), then retry:" >&2
+    cat "$key.pub"; return 1
+  fi
+
+  local socks; socks="$(free_socks_port)"
+  [ -n "$socks" ] || { echo "no free local port for the tunnel" >&2; return 1; }
+  local ssh_bin; ssh_bin="$(command -v ssh)"
+  cat > "/etc/systemd/system/fatllm-relay-$name.service" <<EOF
+[Unit]
+Description=FATLLM relay $name (SOCKS proxy via $host)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=$ssh_bin -NT -D 127.0.0.1:$socks -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$kh -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=20 -i $key -p $port $user@$host
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  umask 077
+  cat > "$RELAY_DIR/$name.json" <<EOF
+{"name":"$name","host":"$host","user":"$user","port":$port,"socks_port":$socks,"note":"SOCKS5 127.0.0.1:$socks via $host"}
+EOF
+  umask 022
+  systemctl daemon-reload
+  systemctl enable --now "fatllm-relay-$name" >/dev/null 2>&1
+  sleep 2
+  echo
+  echo "Relay '$name' is set up."
+  relay_test "$name" || true
+  echo
+  echo "Tell Claude to use it, e.g.:  srv --via $name 'curl -s https://mixin.ir'"
+}
+
+relay_list() {
+  local f n s host st any=0
+  for f in "$RELAY_DIR"/*.json; do
+    [ -e "$f" ] || continue
+    any=1; n="$(json_get "$f" name)"; s="$(json_get "$f" socks_port)"; host="$(json_get "$f" host)"
+    st="$(systemctl is-active "fatllm-relay-$n" 2>/dev/null || echo inactive)"
+    printf '%-12s %-9s socks 127.0.0.1:%s  via %s\n' "$n" "$st" "$s" "$host"
+  done
+  [ "$any" = 1 ] || echo "No relays yet. Add one:  fatllm relay add --host <ip>"
+}
+
+relay_test() {
+  local n="$1" f="$RELAY_DIR/$1.json"
+  [ -f "$f" ] || { echo "no such relay: $n" >&2; return 1; }
+  local s here out_ip
+  s="$(json_get "$f" socks_port)"
+  here="$(curl -fsS --max-time 15 https://api.ipify.org 2>/dev/null || echo '?')"
+  out_ip="$(curl -fsS --max-time 25 --socks5-hostname "127.0.0.1:$s" https://api.ipify.org 2>/dev/null || true)"
+  echo "this server exits from : $here"
+  if [ -n "$out_ip" ]; then
+    echo "via $n exits from      : $out_ip  (OK)"
+  else
+    echo "via $n                 : NOT WORKING yet (tunnel starting? check: systemctl status fatllm-relay-$n)"
+    return 1
+  fi
+}
+
+relay_remove() {
+  local n="$1"
+  [ -f "$RELAY_DIR/$n.json" ] || { echo "no such relay: $n" >&2; return 1; }
+  systemctl disable --now "fatllm-relay-$n" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/fatllm-relay-$n.service" "$RELAY_DIR/$n.json" "$RELAY_DIR/$n.key" "$RELAY_DIR/$n.key.pub"
+  systemctl daemon-reload
+  echo "Relay '$n' removed."
 }
 
 need_root() { [ "$(id -u)" = 0 ] || { echo "Run as root: sudo fatllm" >&2; exit 1; }; }
@@ -108,12 +287,13 @@ case "$cmd" in
     show_key ;;
   off | stop)
     need_root; load
-    systemctl disable --now $UNITS >/dev/null 2>&1 || true
+    # shellcheck disable=SC2046
+    systemctl disable --now $UNITS $(relay_units) >/dev/null 2>&1 || true
     echo "FATLLM is off. Nobody can use the key until: fatllm on" ;;
   on | start)
     need_root; load
     # shellcheck disable=SC2046
-    systemctl enable --now $(units_for_mode) >/dev/null 2>&1
+    systemctl enable --now $(units_for_mode) $(relay_units) >/dev/null 2>&1
     sleep 2
     echo "FATLLM is on."
     show_key ;;
@@ -128,6 +308,11 @@ case "$cmd" in
     else
       echo "expires       never"
     fi
+    for f in "$RELAY_DIR"/*.json; do
+      [ -e "$f" ] || continue
+      rn="$(json_get "$f" name)"
+      printf '%-14s %s\n' "relay:$rn" "$(systemctl is-active "fatllm-relay-$rn" 2>/dev/null || true)"
+    done
     last="$(tail -n 1 /var/log/fatllm/audit.log 2>/dev/null || true)"
     echo "last action   ${last:-none}"
     if [ -n "$base" ] && check "$base"; then echo "self-test     OK"; else echo "self-test     FAILED (see: journalctl -u fatllm -u fatllm-caddy -u fatllm-tunnel -n 50)"; fi ;;
@@ -151,6 +336,18 @@ case "$cmd" in
     need_root; load
     base="$(public_base)" || { echo "no address yet"; exit 1; }
     if check "$base"; then echo "OK: the key works ($base)."; else echo "FAILED. Check: fatllm status"; exit 1; fi ;;
+  relay)
+    need_root
+    mkdir -p "$RELAY_DIR"; chmod 700 "$RELAY_DIR"
+    sub="${1:-list}"; [ $# -gt 0 ] && shift
+    case "$sub" in
+      add) relay_add "$@" ;;
+      list | ls) relay_list ;;
+      test) [ -n "${1:-}" ] || { echo "usage: fatllm relay test <name>" >&2; exit 1; }; relay_test "$1" ;;
+      remove | rm | del) [ -n "${1:-}" ] || { echo "usage: fatllm relay remove <name>" >&2; exit 1; }; relay_remove "$1" ;;
+      help | -h | --help) relay_usage ;;
+      *) relay_usage; exit 1 ;;
+    esac ;;
   update)
     need_root
     tmp="$(mktemp -d)"
@@ -164,8 +361,10 @@ case "$cmd" in
       read -r ans </dev/tty || ans=""
       [ "$ans" = yes ] || { echo "Cancelled."; exit 0; }
     fi
-    systemctl disable --now $UNITS >/dev/null 2>&1 || true
-    for u in $UNITS; do rm -f "/etc/systemd/system/$u.service"; done
+    # shellcheck disable=SC2046
+    systemctl disable --now $UNITS $(relay_units) >/dev/null 2>&1 || true
+    # shellcheck disable=SC2046
+    for u in $UNITS $(relay_units); do rm -f "/etc/systemd/system/$u.service"; done
     systemctl daemon-reload
     rm -rf /opt/fatllm /etc/fatllm "$STATE" /var/log/fatllm
     rm -f /usr/local/bin/fatllm

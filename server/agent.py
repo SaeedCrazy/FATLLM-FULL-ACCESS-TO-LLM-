@@ -51,6 +51,7 @@ MODE = os.environ.get("FATLLM_MODE", "caddy")
 EXPIRES = int(os.environ.get("FATLLM_EXPIRES", "0") or 0)
 CLIENT_SCRIPT = os.environ.get(
     "FATLLM_CLIENT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "srv"))
+RELAY_DIR = os.environ.get("FATLLM_RELAY_DIR", "/etc/fatllm/relays")
 
 JOBS_DIR = os.path.join(STATE_DIR, "jobs")
 AUDIT_LOG = os.path.join(LOG_DIR, "audit.log")
@@ -160,6 +161,42 @@ def gib(n):
     return "%.1f GiB" % (n / 1073741824.0)
 
 
+def load_relays():
+    """Relays configured by `fatllm relay add`: name -> {socks_port, host, note}."""
+    out = {}
+    try:
+        names = os.listdir(RELAY_DIR)
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(RELAY_DIR, name)) as f:
+                r = json.load(f)
+            port = int(r.get("socks_port") or 0)
+            if port and r.get("name"):
+                out[r["name"]] = {"socks_port": port, "host": r.get("host", ""), "note": r.get("note", "")}
+        except (OSError, ValueError, TypeError):
+            continue
+    return out
+
+
+def proxy_env_for(via):
+    """Environment that routes a command's network through a named relay (SOCKS5)."""
+    if not via:
+        return None
+    relays = load_relays()
+    r = relays.get(via)
+    if not r:
+        raise ValueError("unknown relay '%s'; configured relays: %s"
+                         % (via, ", ".join(sorted(relays)) or "none"))
+    socks = "socks5h://127.0.0.1:%d" % r["socks_port"]
+    nope = "127.0.0.1,localhost,::1"
+    return {"ALL_PROXY": socks, "all_proxy": socks, "HTTPS_PROXY": socks, "https_proxy": socks,
+            "HTTP_PROXY": socks, "http_proxy": socks, "NO_PROXY": nope, "no_proxy": nope}
+
+
 def server_info():
     info = {
         "hostname": socket.gethostname(),
@@ -194,6 +231,10 @@ def server_info():
         pass
     with LOCK:
         info["jobs_running"] = sum(1 for j in JOBS.values() if not j.done.is_set())
+    rel = load_relays()
+    if rel:
+        info["relays"] = {n: "via=%s exits through %s (socks5h://127.0.0.1:%d)"
+                          % (n, r["host"] or "another server", r["socks_port"]) for n, r in rel.items()}
     return info
 
 
@@ -213,7 +254,7 @@ class Job(object):
         self.done = threading.Event()
         self.proc = None
 
-    def start(self, stdin_data=None, timeout=0):
+    def start(self, stdin_data=None, timeout=0, extra_env=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith("FATLLM_")}
         env.update({
             "PATH": SAFE_PATH,
@@ -229,6 +270,8 @@ class Job(object):
         })
         if os.geteuid() == 0:
             env["HOME"] = "/root"
+        if extra_env:
+            env.update(extra_env)
         stdin = subprocess.DEVNULL
         stdin_file = None
         if stdin_data is not None:
@@ -308,12 +351,13 @@ def prune_jobs():
         pass
 
 
-def start_job(cmd, cwd, stdin_data, timeout, ip):
+def start_job(cmd, cwd, stdin_data, timeout, ip, via=None):
     if not isinstance(cmd, str) or not cmd.strip():
         raise ValueError("empty command")
     cwd = os.path.expanduser(cwd or "~")
     if not os.path.isdir(cwd):
         raise ValueError("cwd does not exist: %s" % cwd)
+    proxy_env = proxy_env_for(via)  # raises ValueError for an unknown relay
     prune_jobs()
     with LOCK:
         if sum(1 for j in JOBS.values() if not j.done.is_set()) >= MAX_RUNNING:
@@ -321,9 +365,9 @@ def start_job(cmd, cwd, stdin_data, timeout, ip):
     job = Job(cmd, cwd, ip)
     with LOCK:
         JOBS[job.id] = job
-    audit(ip, "run", "job=%s cwd=%s cmd=%s" % (job.id, cwd, cmd))
+    audit(ip, "run", "job=%s cwd=%s%s cmd=%s" % (job.id, cwd, (" via=" + via) if via else "", cmd))
     try:
-        job.start(stdin_data, clamp(timeout, 0, 7 * 86400, 0))
+        job.start(stdin_data, clamp(timeout, 0, 7 * 86400, 0), proxy_env)
     except Exception:
         with LOCK:
             JOBS.pop(job.id, None)
@@ -364,7 +408,7 @@ def format_result(r, next_hint):
 
 def guide(base):
     host = socket.gethostname()
-    return """FATLLM: full root shell on the server "{host}" ({os}).
+    text = """FATLLM: full root shell on the server "{host}" ({os}).
 The owner installed this so an AI assistant can run and manage this server for them.
 They want you to work on your own: run what the task needs, do not stop to ask for
 approval of routine steps. Ask first only before something that destroys data that
@@ -408,6 +452,16 @@ TIPS: use non-interactive flags (apt-get -y, --yes, --force); output over {maxou
 cut in the middle (full log path is shown); restarting this agent ("systemctl restart fatllm")
 does not stop running commands. Owner commands on the server: fatllm key | rotate | off | log.
 """.format(host=host, os=os_name(), base=base, wait=DEFAULT_WAIT, maxwait=MAX_WAIT, maxout=MAX_OUTPUT)
+    rel = load_relays()
+    if rel:
+        lines = "\n".join("  via=%s  ->  exits through %s" % (n, r["host"] or "another server")
+                          for n, r in sorted(rel.items()))
+        text += ("\nRELAYS (reach sites this server itself can't):\n%s\n"
+                 "  route a command through one: srv --via NAME 'curl -s https://site'\n"
+                 "  or: curl '%s/run?via=NAME' --data-binary 'curl -s https://site'\n"
+                 "  Iranian sites -> use the Iran relay; sites blocked from inside Iran -> run WITHOUT via.\n"
+                 % (lines, base))
+    return text
 
 
 MCP_INSTRUCTIONS = (
@@ -436,6 +490,7 @@ TOOLS = [
                 "timeout_seconds": {"type": "integer", "minimum": 0,
                                     "description": "kill it after this many seconds (default: never)"},
                 "stdin": {"type": "string", "description": "text given to the command on stdin"},
+                "via": {"type": "string", "description": "route this command's network through a configured relay by name (e.g. iran) so it exits from another server; relay names are in server_info"},
             },
             "required": ["command"],
         },
@@ -789,7 +844,7 @@ class Handler(BaseHTTPRequestHandler):
         want_json = as_json or truthy(q.get("json", ""))
         try:
             job = start_job(cmd, opt("cwd"), params.get("stdin") if as_json else None,
-                            opt("timeout", 0), ip)
+                            opt("timeout", 0), ip, opt("via"))
         except ValueError as e:
             if want_json:
                 return self.send_json(400, {"error": str(e)})
@@ -961,7 +1016,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if name == "run_command":
                 job = start_job(args.get("command"), args.get("cwd"), args.get("stdin"),
-                                args.get("timeout_seconds", 0), ip)
+                                args.get("timeout_seconds", 0), ip, args.get("via"))
                 job.done.wait(clamp(args.get("wait_seconds", DEFAULT_WAIT), 0, MAX_WAIT, DEFAULT_WAIT))
                 return text(format_result(job.result(), 'check it with job_status(job_id="%s")' % job.id))
             if name == "job_status":

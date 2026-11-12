@@ -31,9 +31,15 @@ class AgentTest(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp()
         cls.port = free_port()
+        cls.relay_dir = os.path.join(cls.tmp, "relays")
+        os.makedirs(cls.relay_dir)
+        with open(os.path.join(cls.relay_dir, "iran.json"), "w") as f:
+            json.dump({"name": "iran", "host": "203.0.113.9", "user": "root",
+                       "port": 22, "socks_port": 9999, "note": "test relay"}, f)
         env = dict(os.environ, FATLLM_TOKEN=TOKEN, FATLLM_LOCAL_PORT=str(cls.port),
                    FATLLM_STATE_DIR=os.path.join(cls.tmp, "state"),
                    FATLLM_LOG_DIR=os.path.join(cls.tmp, "log"),
+                   FATLLM_RELAY_DIR=cls.relay_dir,
                    FATLLM_CLIENT=os.path.join(ROOT, "srv"))
         cls.proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "server", "agent.py")],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -262,6 +268,39 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(json.loads(body), [{"jsonrpc": "2.0", "id": 1, "result": {}}])
         code, _, _ = self.call("/mcp")
         self.assertEqual(code, 405)
+
+    # --- relays
+
+    def test_relay_via_injects_proxy(self):
+        _, _, body = self.call("/run?via=iran", b'echo "$ALL_PROXY|$https_proxy|$NO_PROXY|$HTTP_PROXY"', "POST")
+        t = body.decode()
+        self.assertIn("socks5h://127.0.0.1:9999", t)
+        self.assertIn("127.0.0.1,localhost", t)
+
+    def test_relay_unknown_is_400(self):
+        code, _, body = self.call("/run?via=nope", b"true", "POST")
+        self.assertEqual(code, 400)
+        self.assertIn("unknown relay", body.decode())
+
+    def test_relay_in_guide_and_info(self):
+        _, _, body = self.call("/")
+        self.assertIn("via=iran", body.decode())
+        _, _, body = self.call("/info")
+        self.assertIn("iran", json.loads(body).get("relays", {}))
+
+    def test_relay_mcp_via(self):
+        _, _, body = self.mcp("tools/call", {"name": "run_command",
+                                             "arguments": {"command": 'echo "$ALL_PROXY"', "via": "iran"}}, 30)
+        self.assertIn("socks5h://127.0.0.1:9999", json.loads(body)["result"]["content"][0]["text"])
+        _, _, body = self.mcp("tools/call", {"name": "run_command",
+                                             "arguments": {"command": "true", "via": "nope"}}, 31)
+        self.assertTrue(json.loads(body)["result"]["isError"])
+
+    def test_relay_srv_via(self):
+        env = dict(os.environ, FATLLM_KEY=self.base, HOME=self.tmp, NO_PROXY="*", no_proxy="*")
+        p = subprocess.run([os.path.join(ROOT, "srv"), "--via", "iran", 'echo "$ALL_PROXY"'],
+                           env=env, stdout=subprocess.PIPE, timeout=60)
+        self.assertIn(b"socks5h://127.0.0.1:9999", p.stdout)
 
     def test_audit_log_has_no_token(self):
         self.call("/run", b"echo audited", "POST")

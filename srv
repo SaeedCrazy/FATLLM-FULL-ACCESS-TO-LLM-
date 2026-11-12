@@ -3,6 +3,7 @@
 #
 #   srv key <KEY>                  save the key (in ~/.fatllm-key) and test it
 #   srv '<command>'                run a bash command as root, print output + [exit N]
+#   srv --via <relay> '<command>'  run it routed through a relay (e.g. --via iran)
 #   srv - <<'EOF' ... EOF          run a multi-line script from stdin
 #   srv job <id> [wait]            output/status of a command that was still running
 #   srv kill <id>                  stop it
@@ -59,6 +60,7 @@ run_stdin() {
   hdr="$(mktemp)"
   local url="$key/run?wait=$wait"
   [ -n "${SRV_CWD:-}" ] && url="$url&cwd=$(urlenc "$SRV_CWD")"
+  [ -n "${VIA:-}" ] && url="$url&via=$(urlenc "$VIA")"
   if ! curl -sS --max-time "$((wait + 60))" -D "$hdr" -H 'Content-Type: text/plain' \
       --data-binary @- "$url"; then
     rm -f "$hdr"; die "could not reach the server (network policy? key? 'fatllm status' on the server)"
@@ -69,10 +71,16 @@ run_stdin() {
   exit 0
 }
 
+VIA=""
+if [ "${1:-}" = --via ] || [ "${1:-}" = via ]; then
+  VIA="${2:-}"; [ -n "$VIA" ] || die "usage: srv --via <relay> '<command>'"
+  shift 2
+fi
+
 cmd="${1:-}"
 case "$cmd" in
   "" | -h | --help | help)
-    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   key)
     [ -n "${2:-}" ] || die "usage: srv key '<key>'"
