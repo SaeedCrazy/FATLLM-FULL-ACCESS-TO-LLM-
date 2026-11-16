@@ -12,7 +12,8 @@ usage() {
   cat <<'EOF'
 fatllm - full server access for Claude
 
-  fatllm key            show the key (give it to Claude)
+  fatllm                menu (all options; type a number)
+  fatllm key            show the key (give it to Claude) and the web panel link
   fatllm rotate         make a new key; the old one stops working at once
   fatllm off            turn access off (services stopped)
   fatllm on             turn it back on
@@ -254,8 +255,9 @@ Copy the next line and send it to Claude. That's all.
 
 FATLLM key: $key
 
+Web panel (open on your phone): $key/panel
 It is full root access to this server: keep it secret.
-(claude.ai connector? use the same key + /mcp)
+(claude.ai / ChatGPT connector? use the same key + /mcp)
 Expires: $exp | New key: fatllm rotate | Off: fatllm off
 EOF
   if [ "${FATLLM_MODE:-caddy}" = tunnel ]; then
@@ -263,7 +265,8 @@ EOF
     echo "      run 'fatllm key' again then. For a stable address: fatllm mode direct"
   elif [ "${FATLLM_MODE:-caddy}" = direct ]; then
     echo "Note: self-signed HTTPS. Claude Code (srv) trusts it automatically."
-    echo "      The claude.ai website connector needs a public cert (fatllm mode caddy / --domain)."
+    echo "      Your browser shows a warning for the panel: tap Advanced > Proceed."
+    echo "      Web connectors need a public cert (fatllm mode caddy / --domain)."
   fi
   echo "=================================================="
 }
@@ -285,9 +288,97 @@ check() {
 
 restart_agent() { systemctl restart fatllm; sleep 1; }
 
+# ------------------------------------------------------------------ interactive menu
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+if [ -t 1 ]; then
+  R=$'\033[0m' B=$'\033[1m' D=$'\033[2m' G=$'\033[32m' C=$'\033[36m' Y=$'\033[33m' RD=$'\033[31m'
+else
+  R="" B="" D="" G="" C="" Y="" RD=""
+fi
+
+ask() { local a; printf '%s' "$1" >&2; read -r a </dev/tty || a=""; printf '%s' "$a"; }
+pause() { printf '\n  %sPress Enter to go back%s' "$D" "$R"; read -r _ </dev/tty || true; }
+yes_no() { local a; a="$(ask "  $1 [y/N] ")"; [ "$a" = y ] || [ "$a" = Y ] || [ "$a" = yes ]; }
+sub() { bash "$SELF" "$@" || true; }
+
+menu_header() {
+  local host st exp relays
+  host="$(hostname 2>/dev/null || echo server)"
+  if systemctl is-active --quiet fatllm 2>/dev/null; then st="${G}● online${R}"; else st="${RD}● off${R}"; fi
+  exp="never"
+  [ "${FATLLM_EXPIRES:-0}" != 0 ] && exp="$(date -d "@$FATLLM_EXPIRES" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$FATLLM_EXPIRES")"
+  relays="$(relay_units | wc -w | tr -d ' ')"
+  printf '\033[H\033[2J'
+  printf '\n  %s▌%s %sFATLLM%s  %s· full server access for AI%s\n' "$C" "$R" "$B" "$R" "$D" "$R"
+  printf '  %s▌%s %s   %smode%s %s   %s\n' "$C" "$R" "$host" "$D" "$R" "${FATLLM_MODE:-caddy}" "$st"
+  printf '  %s▌%s %skey expires%s %s   %srelays%s %s\n' "$C" "$R" "$D" "$R" "$exp" "$D" "$R" "$relays"
+  printf '  %s%s%s\n\n' "$D" "──────────────────────────────────────────────" "$R"
+}
+
+menu_item() { printf '   %s%2s%s  %-22s' "$Y" "$1" "$R" "$2"; }
+
+menu() {
+  need_root; load
+  while true; do
+    load
+    menu_header
+    menu_item 1 "Show key";            menu_item 6 "New key (rotate)";   echo
+    menu_item 2 "Web panel link";      menu_item 7 "Key expiry";         echo
+    menu_item 3 "Status & self-test";  menu_item 8 "Relays";             echo
+    menu_item 4 "Activity log";        menu_item 9 "Reachability mode";  echo
+    if systemctl is-active --quiet fatllm 2>/dev/null; then menu_item 5 "Turn access OFF"; else menu_item 5 "Turn access ON"; fi
+    menu_item 10 "Update FATLLM"; echo
+    echo
+    menu_item 0 "Exit"; echo; echo
+    ch="$(ask "  ${B}Choose:${R} ")"
+    case "$ch" in
+      1) sub key; pause ;;
+      2) base="$(public_base 2>/dev/null || true)"
+         if [ -n "$base" ]; then printf '\n  Open this on your phone (it is secret, like the key):\n\n  %s%s/%s/panel%s\n' "$G" "$base" "$FATLLM_TOKEN" "$R"
+         else echo "  No address yet; try again in a minute."; fi
+         [ "${FATLLM_MODE:-caddy}" = direct ] && printf '\n  %sSelf-signed: your browser warns once; tap Advanced > Proceed.%s\n' "$D" "$R"
+         pause ;;
+      3) echo; sub status; pause ;;
+      4) echo; sub log 30; pause ;;
+      5) if systemctl is-active --quiet fatllm 2>/dev/null; then
+           yes_no "Turn access off? The key stops working until you turn it on." && sub off
+         else sub on; fi
+         pause ;;
+      6) yes_no "Make a new key? The current key stops working at once." && sub rotate; pause ;;
+      7) printf '\n   %s1%s  1 hour    %s2%s  24 hours    %s3%s  7 days    %s4%s  never\n' "$Y" "$R" "$Y" "$R" "$Y" "$R" "$Y" "$R"
+         case "$(ask "  Key stops working after: ")" in
+           1) sub expire 1h ;; 2) sub expire 24h ;; 3) sub expire 7d ;; 4) sub expire never ;; *) echo "  Unchanged." ;;
+         esac
+         pause ;;
+      8) printf '\n'; sub relay list
+         printf '\n   %s1%s  add a server   %s2%s  test   %s3%s  remove   %s0%s  back\n' "$Y" "$R" "$Y" "$R" "$Y" "$R" "$Y" "$R"
+         case "$(ask "  Choose: ")" in
+           1) h="$(ask "  Other server IP: ")"; u="$(ask "  User [root]: ")"; n="$(ask "  Short name (e.g. iran): ")"
+              [ -n "$h" ] && sub relay add --host "$h" --user "${u:-root}" ${n:+--name "$n"} ;;
+           2) n="$(ask "  Relay name: ")"; [ -n "$n" ] && sub relay test "$n" ;;
+           3) n="$(ask "  Relay name: ")"; [ -n "$n" ] && yes_no "Remove relay $n?" && sub relay remove "$n" ;;
+         esac
+         pause ;;
+      9) printf '\n   %s1%s  caddy   real certificate (needs port 80 or 443 free; web connectors work)\n' "$Y" "$R"
+         printf '   %s2%s  direct  self-signed, stable address (best for Claude Code)\n' "$Y" "$R"
+         printf '   %s3%s  tunnel  Cloudflare quick tunnel (address changes on restart)\n' "$Y" "$R"
+         case "$(ask "  Mode: ")" in
+           1) sub mode caddy ;; 2) sub mode direct ;; 3) sub mode tunnel ;; *) echo "  Unchanged." ;;
+         esac
+         pause ;;
+      10) sub update; pause ;;
+      0 | q | Q | exit) printf '\033[H\033[2J'; exit 0 ;;
+      *) ;;
+    esac
+  done
+}
+
+if [ $# -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then set -- menu; fi
 cmd="${1:-key}"
 [ $# -gt 0 ] && shift
 case "$cmd" in
+  menu)
+    menu ;;
   key | show)
     need_root; load; show_key ;;
   rotate | new-key)

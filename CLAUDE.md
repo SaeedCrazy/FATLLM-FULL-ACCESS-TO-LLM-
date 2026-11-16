@@ -62,7 +62,15 @@ claude.ai connector.
   server; see its docstring. Token in the first path segment or `Authorization: Bearer`.
   Commands run as jobs with output in a log file, so long commands survive the HTTP call and
   agent restarts (`KillMode=process`).
-- `server/fatllm`: the owner's CLI on the server (key, rotate, off/on, status, log, expire, update, uninstall).
+- `server/panel.html`: the owner's web panel at `<key>/panel` (Persian, RTL, phone-first, dark/light;
+  one self-contained file, no external requests; served with a nonce CSP). It learns its key from
+  its own address and calls the agent's endpoints: `/stats`, `/audit`, `/jobs?json=1`,
+  `/file?json=1` (directory listing), `/file?download=1`, `/run` + `/job/<id>?json=1&offset=`,
+  `/admin/expire`, `/admin/rotate` (new token in memory + env file, old key dies at once),
+  `/admin/off` (runs `fatllm off` after answering). Check it at 390px in both themes with
+  Playwright before committing UI changes (no sideways scroll, no console errors).
+- `server/fatllm`: the owner's CLI on the server (key, rotate, off/on, status, log, expire, mode,
+  relay, update, uninstall). `fatllm` with no arguments on a terminal opens a numbered menu.
 - `srv`: client. The agent serves it at `<key>/srv` with the key built in.
 - `.claude/settings.json`: allows `./srv`, `srv`, `~/srv` and the `fatllm` MCP tools without prompts,
   and runs `.claude/session-start.sh` (links `srv` into /usr/local/bin, checks the key).

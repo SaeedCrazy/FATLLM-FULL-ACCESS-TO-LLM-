@@ -36,10 +36,14 @@ class AgentTest(unittest.TestCase):
         with open(os.path.join(cls.relay_dir, "iran.json"), "w") as f:
             json.dump({"name": "iran", "host": "203.0.113.9", "user": "root",
                        "port": 22, "socks_port": 9999, "note": "test relay"}, f)
+        cls.conf = os.path.join(cls.tmp, "fatllm.env")
+        with open(cls.conf, "w") as f:
+            f.write("FATLLM_TOKEN=%s\nFATLLM_EXPIRES=0\n" % TOKEN)
         env = dict(os.environ, FATLLM_TOKEN=TOKEN, FATLLM_LOCAL_PORT=str(cls.port),
                    FATLLM_STATE_DIR=os.path.join(cls.tmp, "state"),
                    FATLLM_LOG_DIR=os.path.join(cls.tmp, "log"),
                    FATLLM_RELAY_DIR=cls.relay_dir,
+                   FATLLM_CONF=cls.conf,
                    FATLLM_CLIENT=os.path.join(ROOT, "srv"))
         cls.proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "server", "agent.py")],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -302,6 +306,79 @@ class AgentTest(unittest.TestCase):
                            env=env, stdout=subprocess.PIPE, timeout=60)
         self.assertIn(b"socks5h://127.0.0.1:9999", p.stdout)
 
+    # --- web panel and its endpoints
+
+    def test_panel_html_and_csp(self):
+        code, headers, body = self.call("/panel")
+        self.assertEqual(code, 200)
+        self.assertIn("text/html", headers["Content-Type"])
+        html = body.decode()
+        self.assertNotIn("{{NONCE}}", html)
+        csp = headers["Content-Security-Policy"]
+        nonce = csp.split("'nonce-")[1].split("'")[0]
+        self.assertIn('nonce="%s"' % nonce, html)
+        self.assertIn("frame-ancestors 'none'", csp)
+        self.assertNotIn(TOKEN, html)  # the page learns its key from its own address
+        code, _, _ = self.call("/panel", base="http://127.0.0.1:%d/fat_wrong" % self.port)
+        self.assertEqual(code, 404)
+
+    def test_stats(self):
+        _, _, body = self.call("/stats")
+        s = json.loads(body)
+        for k in ("hostname", "cpus", "load", "mem_total", "disk_total", "mode", "expires", "relays"):
+            self.assertIn(k, s)
+        self.assertEqual(s["relays"][0]["name"], "iran")
+        self.assertFalse(s["relays"][0]["up"])  # nothing listens on the test socks port
+
+    def test_audit_endpoint(self):
+        self.call("/run", b"echo audit-endpoint\necho two", "POST")
+        time.sleep(0.3)
+        _, _, body = self.call("/audit?n=50")
+        entries = json.loads(body)["entries"]
+        runs = [e for e in entries if e["action"] == "run" and "audit-endpoint" in e["detail"]]
+        self.assertTrue(runs)
+        self.assertIn("audit-endpoint\necho two", runs[0]["detail"])  # newlines restored
+        self.assertNotIn(TOKEN, body.decode())
+
+    def test_jobs_json(self):
+        self.call("/run", b"echo jobs-json", "POST")
+        _, _, body = self.call("/jobs?json=1")
+        jobs = json.loads(body)["jobs"]
+        self.assertTrue(any(j["command"] == "echo jobs-json" and j["done"] for j in jobs))
+
+    def test_dir_listing_json_and_download_name(self):
+        d = os.path.join(self.tmp, "listing")
+        os.makedirs(os.path.join(d, "sub"), exist_ok=True)
+        with open(os.path.join(d, "a b.txt"), "w") as f:
+            f.write("x")
+        _, _, body = self.call("/file?json=1&path=" + d)
+        r = json.loads(body)
+        self.assertEqual([e["name"] for e in r["entries"]], ["sub", "a b.txt"])  # folders first
+        self.assertTrue(r["entries"][0]["dir"])
+        _, headers, _ = self.call("/file?download=1&path=" + os.path.join(d, "a%20b.txt"))
+        self.assertIn("filename*=UTF-8''a%20b.txt", headers["Content-Disposition"])
+
+    def test_admin_expire(self):
+        code, _, body = self.call("/admin/expire", b'{"in": "2h"}', "POST", {"Content-Type": "application/json"})
+        r = json.loads(body)
+        self.assertEqual(code, 200)
+        self.assertTrue(r["saved"])
+        self.assertAlmostEqual(r["expires"], time.time() + 7200, delta=30)
+        with open(self.conf) as f:
+            self.assertIn("FATLLM_EXPIRES=%d" % r["expires"], f.read())
+        code, _, _ = self.call("/info")
+        self.assertEqual(code, 200)  # still valid
+        code, _, body = self.call("/admin/expire", b'{"in": "soon"}', "POST", {"Content-Type": "application/json"})
+        self.assertEqual(code, 400)
+        _, _, body = self.call("/admin/expire", b'{"in": "never"}', "POST", {"Content-Type": "application/json"})
+        self.assertEqual(json.loads(body)["expires"], 0)
+
+    def test_admin_off_without_cli(self):
+        if shutil.which("fatllm") or os.path.exists("/usr/local/bin/fatllm"):
+            self.skipTest("a real fatllm command is installed here")
+        code, _, _ = self.call("/admin/off", b"", "POST")
+        self.assertEqual(code, 409)
+
     def test_audit_log_has_no_token(self):
         self.call("/run", b"echo audited", "POST")
         time.sleep(0.3)
@@ -309,6 +386,55 @@ class AgentTest(unittest.TestCase):
             log = f.read()
         self.assertIn("echo audited", log)
         self.assertNotIn(TOKEN, log)
+
+
+class RotateTest(unittest.TestCase):
+    """A new key from the panel: the old one stops at once, the new one is saved to the env file."""
+
+    def test_rotate(self):
+        tmp = tempfile.mkdtemp()
+        port = free_port()
+        conf = os.path.join(tmp, "fatllm.env")
+        with open(conf, "w") as f:
+            f.write("FATLLM_TOKEN=%s\nFATLLM_MODE=caddy\n" % TOKEN)
+        env = dict(os.environ, FATLLM_TOKEN=TOKEN, FATLLM_LOCAL_PORT=str(port), FATLLM_CONF=conf,
+                   FATLLM_STATE_DIR=os.path.join(tmp, "s"), FATLLM_LOG_DIR=os.path.join(tmp, "l"))
+        proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "server", "agent.py")],
+                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        def get(url, data=None):
+            try:
+                with opener.open(urllib.request.Request(url, data=data, method="POST" if data is not None else "GET"), timeout=10) as r:
+                    return r.status, r.read()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read()
+        old = "http://127.0.0.1:%d/%s" % (port, TOKEN)
+        try:
+            for _ in range(50):
+                try:
+                    if get(old + "/info")[0] == 200:
+                        break
+                except Exception:
+                    time.sleep(0.1)
+            code, body = get(old + "/admin/rotate", b"")
+            self.assertEqual(code, 200)
+            r = json.loads(body)
+            new_key = r["key"]
+            self.assertTrue(r["saved"])
+            self.assertNotEqual(new_key, old)
+            self.assertEqual(get(old + "/info")[0], 404)
+            self.assertEqual(get(new_key + "/info")[0], 200)
+            new_token = new_key.rsplit("/", 1)[1]
+            with open(conf) as f:
+                saved = f.read()
+            self.assertIn("FATLLM_TOKEN=%s\n" % new_token, saved)
+            self.assertIn("FATLLM_MODE=caddy", saved)  # other settings kept
+            self.assertEqual(oct(os.stat(conf).st_mode & 0o777), "0o600")
+        finally:
+            proc.terminate()
+            proc.wait(5)
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class DirectTLSTest(unittest.TestCase):

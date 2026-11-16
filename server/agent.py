@@ -29,6 +29,7 @@ import platform
 import re
 import secrets
 import shutil
+import shlex
 import signal
 import socket
 import subprocess
@@ -54,6 +55,9 @@ CLIENT_SCRIPT = os.environ.get(
 RELAY_DIR = os.environ.get("FATLLM_RELAY_DIR", "/etc/fatllm/relays")
 TLS_CERT = os.environ.get("FATLLM_TLS_CERT", "").strip()
 TLS_KEY = os.environ.get("FATLLM_TLS_KEY", "").strip()
+CONF_PATH = os.environ.get("FATLLM_CONF", "/etc/fatllm/fatllm.env")
+PANEL_FILE = os.environ.get(
+    "FATLLM_PANEL", os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel.html"))
 
 JOBS_DIR = os.path.join(STATE_DIR, "jobs")
 AUDIT_LOG = os.path.join(LOG_DIR, "audit.log")
@@ -238,6 +242,139 @@ def server_info():
         info["relays"] = {n: "via=%s exits through %s (socks5h://127.0.0.1:%d)"
                           % (n, r["host"] or "another server", r["socks_port"]) for n, r in rel.items()}
     return info
+
+
+def persist_conf(key, value):
+    """Write KEY=value into the env file the service reads (atomic). False when there is none."""
+    try:
+        with open(CONF_PATH) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return False
+    out, found = [], False
+    for line in lines:
+        if line.startswith(key + "="):
+            out.append("%s=%s" % (key, value))
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        out.append("%s=%s" % (key, value))
+    tmp = CONF_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(out) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CONF_PATH)
+    return True
+
+
+def port_open(port):
+    s = socket.socket()
+    s.settimeout(0.5)
+    try:
+        s.connect(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def stats():
+    """Raw numbers for the panel's dashboard."""
+    mem = meminfo()
+    try:
+        du = shutil.disk_usage("/")
+        disk_total, disk_free = du.total, du.free
+    except OSError:
+        disk_total = disk_free = None
+    try:
+        load = [round(x, 2) for x in os.getloadavg()]
+    except OSError:
+        load = []
+    try:
+        with open("/proc/uptime") as f:
+            up = int(float(f.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        up = None
+    with LOCK:
+        running = sum(1 for j in JOBS.values() if not j.done.is_set())
+    relays = [{"name": n, "host": r["host"], "socks_port": r["socks_port"], "up": port_open(r["socks_port"])}
+              for n, r in sorted(load_relays().items())]
+    return {
+        "hostname": socket.gethostname(), "os": os_name(), "kernel": platform.release(),
+        "arch": platform.machine(), "cpus": os.cpu_count() or 1, "load": load, "uptime_s": up,
+        "mem_total": mem.get("MemTotal"), "mem_available": mem.get("MemAvailable"),
+        "swap_total": mem.get("SwapTotal"), "swap_free": mem.get("SwapFree"),
+        "disk_total": disk_total, "disk_free": disk_free,
+        "jobs_running": running, "mode": MODE, "expires": EXPIRES, "agent": VERSION,
+        "time": int(time.time()), "relays": relays,
+        "conf_writable": os.access(CONF_PATH, os.W_OK),
+        "fatllm_cli": bool(shutil.which("fatllm") or os.path.exists("/usr/local/bin/fatllm")),
+    }
+
+
+def unescape_audit(s):
+    out, i = [], 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s):
+            out.append("\n" if s[i + 1] == "n" else s[i + 1])
+            i += 2
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+
+def read_audit(n=200):
+    lines = []
+    for path in (AUDIT_LOG + ".1", AUDIT_LOG):
+        try:
+            with open(path) as f:
+                lines.extend(f.read().splitlines())
+        except OSError:
+            pass
+    out = []
+    for line in reversed(lines[-n:]):
+        parts = line.split(" ", 3)
+        if len(parts) < 3:
+            continue
+        out.append({"time": parts[0], "ip": parts[1], "action": parts[2],
+                    "detail": unescape_audit(parts[3]) if len(parts) > 3 else ""})
+    return out
+
+
+def parse_duration(value):
+    """'30m' / '12h' / '7d' -> epoch seconds from now; 'never' -> 0."""
+    v = str(value or "").strip().lower()
+    if v in ("never", "0", ""):
+        return 0
+    m = re.match(r"^(\d+)\s*([mhd])$", v)
+    if not m:
+        raise ValueError("use 30m, 12h, 7d or never")
+    secs = int(m.group(1)) * {"m": 60, "h": 3600, "d": 86400}[m.group(2)]
+    if secs <= 0 or secs > 3650 * 86400:
+        raise ValueError("duration out of range")
+    return int(time.time()) + secs
+
+
+def list_dir_json(path, limit=3000):
+    entries = []
+    names = os.listdir(path)
+    for name in names[:limit]:
+        full = os.path.join(path, name)
+        try:
+            st = os.lstat(full)
+        except OSError:
+            continue
+        islink = os.path.islink(full)
+        entries.append({
+            "name": name, "dir": os.path.isdir(full), "link": os.readlink(full) if islink else None,
+            "size": st.st_size, "mode": oct(st.st_mode & 0o7777)[2:].rjust(4, "0"),
+            "mtime": int(st.st_mtime)})
+    entries.sort(key=lambda e: (not e["dir"], e["name"].lower()))
+    parent = os.path.dirname(path.rstrip("/")) or "/"
+    return {"path": path, "parent": parent, "entries": entries, "truncated": len(names) > limit}
 
 
 # ----------------------------------------------------------------------------- jobs
@@ -788,6 +925,18 @@ class Handler(BaseHTTPRequestHandler):
             m = self.command
             if path in ("/", "/guide") and m in ("GET", "HEAD"):
                 return self.send(200, guide(self.base()))
+            if path in ("/panel", "/panel/") and m in ("GET", "HEAD"):
+                return self.h_panel()
+            if path == "/stats" and m in ("GET", "HEAD"):
+                return self.send_json(200, stats())
+            if path == "/audit" and m in ("GET", "HEAD"):
+                return self.send_json(200, {"entries": read_audit(clamp(q.get("n", 300), 1, 3000, 300))})
+            if path == "/admin/expire" and m == "POST":
+                return self.h_expire(ip)
+            if path == "/admin/rotate" and m == "POST":
+                return self.h_rotate(ip)
+            if path == "/admin/off" and m == "POST":
+                return self.h_off(ip)
             if path == "/run" and m == "POST":
                 return self.h_run(q, ip)
             if path == "/info" and m in ("GET", "HEAD"):
@@ -800,7 +949,7 @@ class Handler(BaseHTTPRequestHandler):
                 if m in ("PUT", "POST"):
                     return self.h_put_file(q, ip)
             if path == "/jobs" and m in ("GET", "HEAD"):
-                return self.h_jobs()
+                return self.h_jobs(q)
             jm = re.match(r"^/job/([0-9a-f]{8})(/kill)?/?$", path)
             if jm:
                 if jm.group(2) and m in ("POST", "DELETE"):
@@ -883,13 +1032,76 @@ class Handler(BaseHTTPRequestHandler):
         job.kill()
         return self.reply_job(job.result(), False)
 
-    def h_jobs(self):
+    def h_jobs(self, q=None):
         with LOCK:
             jobs = sorted(JOBS.values(), key=lambda j: j.started, reverse=True)[:50]
+        if q and truthy(q.get("json", "")):
+            return self.send_json(200, {"jobs": [{
+                "id": j.id, "done": j.done.is_set(), "exit_code": j.exit_code, "killed": j.killed,
+                "started": int(j.started), "seconds": round((j.ended or time.time()) - j.started, 1),
+                "command": j.cmd if len(j.cmd) <= 300 else j.cmd[:300] + "..."} for j in jobs]})
         lines = ["%s  %-8s  %7.1fs  %s" % (
             j.id, ("exit %s" % j.exit_code) if j.done.is_set() else "running",
             (j.ended or time.time()) - j.started, j.cmd.replace("\n", " ")[:120]) for j in jobs]
         return self.send(200, "\n".join(lines) + ("\n" if lines else "no jobs\n"))
+
+    def h_panel(self):
+        try:
+            with open(PANEL_FILE, encoding="utf-8") as f:
+                html = f.read()
+        except OSError:
+            return self.send(404, "panel not installed; run: fatllm update\n")
+        nonce = secrets.token_urlsafe(16)
+        html = html.replace("{{NONCE}}", nonce)
+        csp = ("default-src 'none'; script-src 'nonce-%s'; style-src 'unsafe-inline'; connect-src 'self'; "
+               "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" % nonce)
+        return self.send(200, html, "text/html; charset=utf-8",
+                         {"Content-Security-Policy": csp, "X-Frame-Options": "DENY"})
+
+    def read_json_body(self):
+        try:
+            data = json.loads(self.read_body(65536).decode("utf-8") or "{}")
+        except ValueError:
+            raise ValueError("body is not JSON")
+        if not isinstance(data, dict):
+            raise ValueError("body must be a JSON object")
+        return data
+
+    def h_expire(self, ip):
+        global EXPIRES
+        try:
+            new = parse_duration(self.read_json_body().get("in"))
+        except ValueError as e:
+            return self.send_json(400, {"error": str(e)})
+        saved = persist_conf("FATLLM_EXPIRES", str(new))
+        EXPIRES = new
+        audit(ip, "expire", "never" if not new else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(new)))
+        return self.send_json(200, {"expires": new, "saved": saved})
+
+    def h_rotate(self, ip):
+        global TOKEN
+        new = "fat_" + secrets.token_urlsafe(32)
+        if os.path.exists(CONF_PATH):
+            try:
+                persist_conf("FATLLM_TOKEN", new)
+            except OSError as e:
+                return self.send_json(500, {"error": "could not save the new key: %s" % e})
+            saved = True
+        else:
+            saved = False
+        TOKEN = new
+        audit(ip, "rotate", "new key made; the old one stopped working")
+        return self.send_json(200, {"key": self.base(), "saved": saved})
+
+    def h_off(self, ip):
+        fat = shutil.which("fatllm") or "/usr/local/bin/fatllm"
+        if not os.path.exists(fat):
+            return self.send_json(409, {"error": "the fatllm command is not installed here"})
+        audit(ip, "off", "access turned off from the panel")
+        self.send_json(200, {"ok": True})
+        subprocess.Popen(["/bin/sh", "-c", "sleep 2; exec %s off" % shlex.quote(fat)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, close_fds=True)
 
     def h_client(self):
         try:
@@ -906,6 +1118,11 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:
             return self.send(400, "error: %s\n" % e)
         if os.path.isdir(path):
+            if truthy(q.get("json", "")):
+                try:
+                    return self.send_json(200, list_dir_json(path))
+                except OSError as e:
+                    return self.send_json(403, {"error": "cannot list %s: %s" % (path, e.strerror)})
             return self.send(200, list_dir(path))
         try:
             f = open(path, "rb")
@@ -919,6 +1136,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(size))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if truthy(q.get("download", "")):
+                from urllib.parse import quote
+                self.send_header("Content-Disposition",
+                                 "attachment; filename*=UTF-8''%s" % quote(os.path.basename(path) or "file"))
             self.send_header("Connection", "close")
             self.end_headers()
             self.close_connection = True

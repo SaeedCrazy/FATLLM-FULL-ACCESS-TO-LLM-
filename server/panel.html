@@ -1,0 +1,1064 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#070b16">
+<title>FATLLM</title>
+<style>
+:root {
+  --bg: #070b16; --glow1: rgba(78, 230, 176, .10); --glow2: rgba(122, 162, 255, .13);
+  --card: rgba(255, 255, 255, .045); --card2: rgba(255, 255, 255, .08); --line: rgba(255, 255, 255, .09);
+  --text: #e9eef8; --muted: #9aa6bd; --faint: #7f8ba4;
+  --accent: #4ee6b0; --accent-ink: #032419; --accent2: #7aa2ff;
+  --warn: #ffc857; --danger: #ff6b7a; --ok: #4ee6b0;
+  --term: #04070e; --term-text: #d7e2f2; --term-dim: #7f8ba4;
+  --shadow: 0 12px 32px rgba(0, 0, 0, .35);
+  --r: 18px; --nav-h: 68px;
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg: #f2f5fb; --glow1: rgba(16, 170, 120, .10); --glow2: rgba(60, 100, 230, .10);
+  --card: #ffffff; --card2: #f3f6fb; --line: rgba(15, 23, 42, .09);
+  --text: #0d1526; --muted: #4f5b73; --faint: #66728a;
+  --accent: #0a8a5c; --accent-ink: #ffffff; --accent2: #2f5bd8;
+  --warn: #9a6400; --danger: #c42a3d; --ok: #0a8a5c;
+  --shadow: 0 8px 24px rgba(15, 23, 42, .08);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f2f5fb; --glow1: rgba(16, 170, 120, .10); --glow2: rgba(60, 100, 230, .10);
+    --card: #ffffff; --card2: #f3f6fb; --line: rgba(15, 23, 42, .09);
+    --text: #0d1526; --muted: #4f5b73; --faint: #66728a;
+    --accent: #0a8a5c; --accent-ink: #ffffff; --accent2: #2f5bd8;
+    --warn: #9a6400; --danger: #c42a3d; --ok: #0a8a5c;
+    --shadow: 0 8px 24px rgba(15, 23, 42, .08);
+    color-scheme: light;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  background-image: radial-gradient(60rem 30rem at 110% -10%, var(--glow2), transparent 60%),
+                    radial-gradient(50rem 28rem at -20% 0%, var(--glow1), transparent 60%);
+  background-attachment: fixed;
+  color: var(--text);
+  font: 15px/1.65 "Vazirmatn", "Vazir", "IRANSansX", "Segoe UI", Tahoma, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh; overflow-x: hidden;
+}
+.mono, code, pre, textarea.mono, input.mono {
+  font-family: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent2); outline-offset: 2px; border-radius: 10px; }
+[hidden] { display: none !important; }
+
+/* ---------- layout ---------- */
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 16px calc(var(--nav-h) + 28px + env(safe-area-inset-bottom)); }
+.top {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 12px;
+  padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
+  max-width: 760px; margin: 0 auto;
+  background: linear-gradient(var(--bg) 55%, transparent);
+}
+.logo {
+  width: 40px; height: 40px; border-radius: 13px; flex: none;
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #04101c; box-shadow: 0 6px 18px rgba(78, 230, 176, .25);
+}
+.logo svg { width: 22px; height: 22px; }
+.brand { flex: 1; min-width: 0; }
+.brand b { display: block; font-size: 16px; letter-spacing: .02em; }
+.brand span { display: block; color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.icon-btn {
+  width: 44px; height: 44px; border-radius: 14px; flex: none;
+  display: grid; place-items: center;
+  background: var(--card); border: 1px solid var(--line);
+}
+.icon-btn svg { width: 20px; height: 20px; }
+
+.view { animation: in .28s ease both; }
+@keyframes in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .view, .ring circle.v { animation: none !important; transition: none !important; } }
+
+h2.sec { font-size: 14px; color: var(--muted); font-weight: 600; margin: 26px 4px 10px; display: flex; align-items: center; gap: 8px; }
+h2.sec .eyebrow { margin: 0; }
+.eyebrow { font: 600 11px/1 ui-monospace, Menlo, monospace; letter-spacing: .18em; color: var(--faint); text-transform: uppercase; direction: ltr; }
+
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r);
+  box-shadow: var(--shadow); padding: 16px;
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+}
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.ltr { direction: ltr; unicode-bidi: isolate; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.grow { flex: 1; min-width: 0; }
+
+/* ---------- buttons ---------- */
+.btn {
+  min-height: 44px; padding: 0 16px; border-radius: 14px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  background: var(--card2); border: 1px solid var(--line); font-weight: 600; font-size: 14px;
+  transition: transform .12s ease, filter .12s ease;
+}
+.btn:active { transform: scale(.97); }
+.btn svg { width: 18px; height: 18px; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.btn.danger { background: transparent; color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+.btn.danger.solid { background: var(--danger); color: #fff; border-color: transparent; }
+.btn.ghost { background: transparent; }
+.btn.block { width: 100%; }
+.btn[disabled] { opacity: .55; pointer-events: none; }
+
+/* ---------- pills / chips ---------- */
+.pill { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 999px; font-size: 12.5px; font-weight: 600; background: var(--card2); border: 1px solid var(--line); white-space: nowrap; }
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.pill.ok { color: var(--ok); } .pill.ok .dot { background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 22%, transparent); animation: pulse 2s infinite; }
+.pill.warn { color: var(--warn); } .pill.warn .dot { background: var(--warn); }
+.pill.bad { color: var(--danger); } .pill.bad .dot { background: var(--danger); }
+@keyframes pulse { 50% { box-shadow: 0 0 0 7px transparent; } }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border-radius: 12px; background: var(--card2); border: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+.chip svg { width: 15px; height: 15px; }
+.chip.btnlike { cursor: pointer; color: var(--text); min-height: 36px; }
+
+/* ---------- home ---------- */
+.hero { position: relative; overflow: hidden; }
+.hero::after { content: ""; position: absolute; inset: auto -40px -60px auto; width: 180px; height: 180px; border-radius: 50%; background: radial-gradient(circle, var(--glow1), transparent 70%); pointer-events: none; }
+.hero-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.hero h1 { font-size: 22px; margin: 6px 0 2px; line-height: 1.3; word-break: break-all; }
+.hero .chips { margin-top: 14px; }
+
+.rings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
+.ring-card { text-align: center; padding: 14px 8px 12px; }
+.ring { width: 84px; height: 84px; margin: 0 auto; position: relative; }
+.ring svg { width: 84px; height: 84px; transform: rotate(-90deg); }
+.ring circle { fill: none; stroke-width: 8; }
+.ring circle.t { stroke: var(--card2); }
+.ring circle.v { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset .8s ease, stroke .3s; }
+.ring .val { position: absolute; inset: 0; display: grid; place-items: center; font-weight: 700; font-size: 17px; }
+.ring-card .lbl { margin-top: 6px; font-weight: 600; font-size: 13.5px; }
+.ring-card .sub { color: var(--muted); font-size: 12px; min-height: 18px; }
+
+.minis { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 10px; }
+.mini { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.mini .ico { width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; background: var(--card2); color: var(--accent2); flex: none; }
+.mini .ico svg { width: 19px; height: 19px; }
+.mini b { display: block; font-size: 16px; }
+.mini span { display: block; color: var(--muted); font-size: 12.5px; }
+
+.actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.action { display: flex; align-items: center; gap: 10px; text-align: start; padding: 13px 14px; min-height: 56px; border-radius: 16px; background: var(--card); border: 1px solid var(--line); font-weight: 600; font-size: 14px; }
+.action svg { width: 19px; height: 19px; color: var(--accent); flex: none; }
+.action.danger svg { color: var(--danger); }
+.action:active { transform: scale(.98); }
+
+.cta { display: flex; align-items: center; gap: 14px; margin-top: 12px; cursor: pointer; background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, var(--card)), color-mix(in srgb, var(--accent2) 16%, var(--card))); }
+.cta .ico { width: 46px; height: 46px; border-radius: 15px; display: grid; place-items: center; background: var(--card2); color: var(--accent); flex: none; }
+.cta .ico svg { width: 24px; height: 24px; }
+.cta b { display: block; }
+
+/* ---------- terminal ---------- */
+.term { padding: 0; overflow: hidden; background: var(--term); border-color: rgba(255,255,255,.08); }
+.term-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,.07); color: var(--term-dim); font-size: 12.5px; }
+.term-head .lights { display: flex; gap: 6px; direction: ltr; }
+.term-head .lights i { width: 10px; height: 10px; border-radius: 50%; background: #ff6b7a; display: block; }
+.term-head .lights i:nth-child(2) { background: #ffc857; } .term-head .lights i:nth-child(3) { background: #4ee6b0; }
+.term-head select { background: rgba(255,255,255,.06); color: var(--term-text); border: 1px solid rgba(255,255,255,.1); border-radius: 10px; padding: 6px 8px; font-size: 12.5px; min-height: 34px; }
+.term-head .icon-btn { width: 36px; height: 36px; border-radius: 11px; background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.1); color: var(--term-text); }
+.term-out { margin: 0; padding: 14px; height: 52vh; min-height: 260px; overflow: auto; color: var(--term-text); font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; direction: ltr; text-align: left; }
+.term-out .p { color: #4ee6b0; } .term-out .p .via { color: #7aa2ff; }
+.term-out .e0 { color: #4ee6b0; } .term-out .e1 { color: #ff8a96; } .term-out .info { color: #7f8ba4; }
+.term-empty { color: #7f8ba4; direction: rtl; text-align: center; font-family: inherit; padding-top: 18%; }
+.term-input { margin-top: 10px; padding: 10px; }
+.term-input textarea { width: 100%; min-height: 50px; max-height: 40vh; resize: vertical; border: 1px solid var(--line); border-radius: 13px; background: var(--card2); padding: 10px 12px; direction: ltr; text-align: left; font-size: 14px; }
+.term-input .row { margin-top: 10px; }
+.hist { margin-top: 10px; }
+.hist .chip { max-width: 100%; direction: ltr; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid currentColor; border-top-color: transparent; animation: spin .8s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- lists (files, activity) ---------- */
+.pathbar { display: flex; gap: 8px; padding: 8px; }
+.pathbar input { flex: 1; min-width: 0; min-height: 44px; border-radius: 12px; border: 1px solid var(--line); background: var(--card2); padding: 0 12px; direction: ltr; text-align: left; font-size: 14px; }
+.list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+.item { display: flex; align-items: center; gap: 12px; padding: 11px 13px; border-radius: 15px; background: var(--card); border: 1px solid var(--line); min-height: 58px; }
+.item.tap { cursor: pointer; } .item.tap:active { transform: scale(.99); }
+.item .ico { width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; flex: none; background: var(--card2); color: var(--muted); }
+.item .ico svg { width: 19px; height: 19px; }
+.item .ico.dir { color: var(--warn); } .item .ico.run { color: var(--accent); } .item .ico.file { color: var(--accent2); } .item .ico.sec { color: var(--danger); }
+.item .t { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .t.mono { direction: ltr; text-align: right; unicode-bidi: plaintext; }
+.item .m { color: var(--muted); font-size: 12.5px; }
+.item .cmd { direction: ltr; text-align: left; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; background: var(--card2); border-radius: 10px; padding: 7px 10px; margin-top: 6px; white-space: pre-wrap; word-break: break-word; max-height: 4.8em; overflow: hidden; }
+.item.open .cmd { max-height: none; }
+.badge { font-size: 11.5px; font-weight: 700; padding: 3px 8px; border-radius: 8px; background: var(--card2); white-space: nowrap; }
+.badge.ok { color: var(--ok); } .badge.bad { color: var(--danger); } .badge.run { color: var(--accent2); }
+.seg { display: flex; gap: 6px; padding: 5px; border-radius: 15px; background: var(--card); border: 1px solid var(--line); overflow-x: auto; }
+.seg button { flex: 1; min-height: 38px; border-radius: 11px; border: 0; background: transparent; color: var(--muted); font-weight: 600; font-size: 13.5px; white-space: nowrap; padding: 0 12px; }
+.seg button[aria-pressed="true"] { background: var(--card2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+.empty { text-align: center; color: var(--muted); padding: 34px 10px; }
+.empty svg { width: 34px; height: 34px; opacity: .6; display: block; margin: 0 auto 8px; }
+
+/* ---------- settings ---------- */
+.set { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.field { display: flex; align-items: center; gap: 8px; background: var(--card2); border: 1px solid var(--line); border-radius: 13px; padding: 6px 6px 6px 12px; }
+.field code { flex: 1; min-width: 0; direction: ltr; text-align: left; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-inline-start: 6px; }
+.field .icon-btn { width: 38px; height: 38px; border-radius: 11px; }
+.label { font-size: 13px; color: var(--muted); margin: 0 4px 6px; }
+details.plat { border: 1px solid var(--line); border-radius: 15px; background: var(--card2); }
+details.plat + details.plat { margin-top: 8px; }
+details.plat summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: 12px 14px; font-weight: 600; min-height: 48px; }
+details.plat summary::-webkit-details-marker { display: none; }
+details.plat summary .tag { margin-inline-start: auto; }
+details.plat[open] summary { border-bottom: 1px solid var(--line); }
+details.plat ol { margin: 0; padding: 12px 34px 14px 16px; color: var(--muted); font-size: 13.5px; }
+details.plat ol li + li { margin-top: 6px; }
+details.plat b { color: var(--text); }
+.note { border-radius: 14px; padding: 11px 13px; font-size: 13px; background: color-mix(in srgb, var(--warn) 12%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); color: var(--text); }
+.note code { white-space: nowrap; }
+#f-go svg { transform: scaleX(-1); }
+.note.info { background: color-mix(in srgb, var(--accent2) 10%, transparent); border-color: color-mix(in srgb, var(--accent2) 30%, transparent); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; font-size: 13.5px; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; text-align: left; direction: ltr; unicode-bidi: plaintext; overflow-wrap: anywhere; }
+.relay-out { margin-top: 8px; font-size: 12.5px; }
+
+/* ---------- nav ---------- */
+.tabs {
+  position: fixed; z-index: 30; left: 50%; transform: translateX(-50%);
+  bottom: calc(10px + env(safe-area-inset-bottom));
+  width: min(520px, calc(100% - 20px)); height: var(--nav-h);
+  display: grid; grid-template-columns: repeat(5, 1fr);
+  padding: 6px; border-radius: 22px;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  border: 1px solid var(--line); box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3); backdrop-filter: blur(18px) saturate(1.3);
+}
+.tabs button { border: 0; background: transparent; border-radius: 16px; color: var(--muted); display: grid; place-items: center; align-content: center; gap: 3px; font-size: 11.5px; font-weight: 600; }
+.tabs button svg { width: 22px; height: 22px; }
+.tabs button[aria-current="page"] { color: var(--accent); background: var(--card2); }
+
+/* ---------- overlays ---------- */
+.toast { position: fixed; z-index: 60; left: 50%; transform: translate(-50%, 20px); bottom: calc(var(--nav-h) + 24px + env(safe-area-inset-bottom)); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 14px; font-weight: 600; font-size: 14px; opacity: 0; pointer-events: none; transition: .25s ease; max-width: calc(100% - 32px); text-align: center; }
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.overlay { position: fixed; inset: 0; z-index: 50; background: rgba(2, 5, 12, .6); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); display: flex; align-items: flex-end; justify-content: center; padding: 12px; animation: fade .2s ease; }
+@keyframes fade { from { opacity: 0; } }
+.sheet { width: min(640px, 100%); max-height: calc(100vh - 40px); overflow: auto; background: var(--bg); background-image: linear-gradient(var(--card), var(--card)); border: 1px solid var(--line); border-radius: 22px; padding: 18px; box-shadow: var(--shadow); animation: up .25s ease; }
+@keyframes up { from { transform: translateY(24px); } }
+.sheet h3 { margin: 0 0 6px; font-size: 18px; }
+.sheet p { margin: 0 0 14px; color: var(--muted); }
+.sheet .acts { display: flex; gap: 10px; margin-top: 16px; }
+.sheet .acts .btn { flex: 1; }
+.viewer pre, .viewer textarea { width: 100%; margin: 0; max-height: 60vh; min-height: 40vh; overflow: auto; background: var(--term); color: var(--term-text); border-radius: 14px; padding: 12px; font-size: 12.5px; direction: ltr; text-align: left; white-space: pre; border: 1px solid var(--line); }
+.viewer textarea { resize: vertical; }
+.fatal { min-height: 80vh; display: grid; place-items: center; text-align: center; padding: 20px; }
+.fatal .card { max-width: 420px; }
+.fatal svg { width: 46px; height: 46px; color: var(--danger); }
+@media (min-width: 640px) {
+  .actions { grid-template-columns: repeat(4, 1fr); }
+  .minis { grid-template-columns: repeat(4, 1fr); }
+  .overlay { align-items: center; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="logo" aria-hidden="true" id="logo"></div>
+  <div class="brand"><b>FATLLM</b><span id="top-host">در حال اتصال…</span></div>
+  <span class="pill" id="top-status"><i class="dot"></i><span>…</span></span>
+  <button class="icon-btn" id="theme-btn" aria-label="تغییر تم"></button>
+</header>
+
+<main class="wrap" id="main">
+  <!-- HOME -->
+  <section class="view" id="v-home" aria-label="داشبورد">
+    <div class="card hero">
+      <div class="hero-top">
+        <div class="grow">
+          <div class="eyebrow">SERVER</div>
+          <h1 class="ltr" id="h-host" style="text-align:right">—</h1>
+          <div class="muted small" id="h-os">—</div>
+        </div>
+      </div>
+      <div class="chips">
+        <span class="chip" id="h-uptime"></span>
+        <span class="chip" id="h-mode"></span>
+        <span class="chip" id="h-exp"></span>
+      </div>
+    </div>
+    <div class="rings">
+      <div class="card ring-card" id="r-cpu"></div>
+      <div class="card ring-card" id="r-mem"></div>
+      <div class="card ring-card" id="r-disk"></div>
+    </div>
+    <div class="minis" id="minis"></div>
+    <h2 class="sec"><span class="eyebrow">QUICK</span>کارهای سریع</h2>
+    <div class="actions" id="actions"></div>
+    <div class="card cta" id="cta-connect" role="button" tabindex="0">
+      <div class="ico" id="cta-ico"></div>
+      <div class="grow"><b>وصل کردن هوش مصنوعی</b><span class="muted small">کلید، آدرس MCP و راهنمای Claude، ChatGPT و بقیه</span></div>
+    </div>
+  </section>
+
+  <!-- TERMINAL -->
+  <section class="view" id="v-term" aria-label="ترمینال" hidden>
+    <div class="card term">
+      <div class="term-head">
+        <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="grow ltr mono" id="t-who" style="text-align:left">root@server</span>
+        <select id="t-via" aria-label="مسیر اجرا"><option value="">مستقیم</option></select>
+        <button class="icon-btn" id="t-clear" aria-label="پاک کردن صفحه"></button>
+      </div>
+      <pre class="term-out" id="t-out" aria-live="polite"><div class="term-empty">یک دستور بنویس و «اجرا» را بزن.<br>دستورها با دسترسی root روی سرور اجرا می‌شوند.</div></pre>
+    </div>
+    <div class="card term-input">
+      <label class="label" for="t-cmd">دستور</label>
+      <textarea id="t-cmd" class="mono" rows="2" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="df -h"></textarea>
+      <div class="row">
+        <button class="btn primary grow" id="t-run"></button>
+        <button class="btn danger" id="t-stop" hidden></button>
+      </div>
+      <div class="chips hist" id="t-hist"></div>
+    </div>
+  </section>
+
+  <!-- FILES -->
+  <section class="view" id="v-files" aria-label="فایل‌ها" hidden>
+    <div class="card pathbar">
+      <button class="icon-btn" id="f-up" aria-label="پوشه‌ی بالاتر"></button>
+      <input id="f-path" class="mono" spellcheck="false" autocapitalize="off" aria-label="مسیر" value="/root">
+      <button class="icon-btn" id="f-go" aria-label="برو"></button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn grow" id="f-upload"></button>
+      <button class="btn" id="f-refresh" aria-label="تازه‌سازی"></button>
+      <input type="file" id="f-file" multiple hidden>
+    </div>
+    <ul class="list" id="f-list"></ul>
+  </section>
+
+  <!-- ACTIVITY -->
+  <section class="view" id="v-activity" aria-label="فعالیت‌ها" hidden>
+    <div class="row">
+      <div class="seg grow" id="a-seg" role="group" aria-label="فیلتر">
+        <button data-f="all" aria-pressed="true">همه</button>
+        <button data-f="run" aria-pressed="false">دستورها</button>
+        <button data-f="file" aria-pressed="false">فایل‌ها</button>
+        <button data-f="sec" aria-pressed="false">امنیت</button>
+      </div>
+      <button class="icon-btn" id="a-refresh" aria-label="تازه‌سازی"></button>
+    </div>
+    <div id="a-running"></div>
+    <ul class="list" id="a-list"></ul>
+  </section>
+
+  <!-- SETTINGS -->
+  <section class="view" id="v-settings" aria-label="تنظیمات" hidden>
+    <h2 class="sec" id="connect"><span class="eyebrow">CONNECT</span>اتصال هوش مصنوعی</h2>
+    <div class="card set">
+      <div>
+        <div class="label">کلید (دسترسی root کامل)</div>
+        <div class="field"><code id="s-key"></code>
+          <button class="icon-btn" id="s-key-eye" aria-label="نمایش کلید"></button>
+          <button class="icon-btn" id="s-key-copy" aria-label="کپی کلید"></button></div>
+      </div>
+      <div>
+        <div class="label">آدرس MCP (برای کانکتورها)</div>
+        <div class="field"><code id="s-mcp"></code>
+          <button class="icon-btn" id="s-mcp-copy" aria-label="کپی آدرس MCP"></button></div>
+      </div>
+      <button class="btn primary block" id="s-msg-copy"></button>
+      <div class="note" id="s-direct-note" hidden>این سرور در حالت <b>HTTPS مستقیم (self-signed)</b> است. Claude Code بدون مشکل وصل می‌شود، ولی کانکتورهای وب (claude.ai و ChatGPT) گواهی عمومی می‌خواهند. برای آن‌ها روی سرور بزن: <code class="ltr">fatllm mode caddy</code></div>
+      <div>
+        <details class="plat"><summary><span id="pi1"></span>Claude Code <span class="badge ok tag">پیشنهادی</span></summary>
+          <ol>
+            <li>در تنظیمات محیط ابری، <b>Network access</b> را روی <b>Full</b> بگذار.</li>
+            <li>متغیر <b class="ltr">FATLLM_KEY</b> را برابر کلید بگذار (یا فقط «پیام آماده» را در چت بفرست).</li>
+            <li>جلسه را روی ریپوی FATLLM باز کن؛ بدون پرسیدن کار می‌کند.</li>
+          </ol></details>
+        <details class="plat"><summary><span id="pi2"></span>claude.ai</summary>
+          <ol>
+            <li>Settings ← Connectors ← <b>Add custom connector</b></li>
+            <li>آدرس MCP بالا را بده.</li>
+            <li>در تنظیمات همان کانکتور، ابزارها را روی <b>Always allow</b> بگذار.</li>
+          </ol></details>
+        <details class="plat"><summary><span id="pi3"></span>ChatGPT</summary>
+          <ol>
+            <li>Settings ← Connectors ← Advanced ← <b>Developer mode</b> را روشن کن.</li>
+            <li>یک کانکتور تازه بساز و آدرس MCP را بده.</li>
+            <li>ChatGPT ممکن است برای کارهای تغییردهنده تأیید بخواهد؛ این تنظیم خودش است.</li>
+          </ol></details>
+        <details class="plat"><summary><span id="pi4"></span>سایر ایجنت‌ها</summary>
+          <ol>
+            <li>هر ایجنتی که <b>MCP</b> می‌شناسد: آدرس MCP.</li>
+            <li>هر ایجنتی که دستور یا درخواست وب می‌زند: خود کلید؛ راهنمای کامل داخلش است.</li>
+          </ol></details>
+      </div>
+      <div class="note info small">کلید را فقط جایی بگذار که به آن اعتماد داری. اگر لو رفت، پایین «کلید تازه» را بزن.</div>
+    </div>
+
+    <h2 class="sec"><span class="eyebrow">SECURITY</span>امنیت و دسترسی</h2>
+    <div class="card set">
+      <div class="row"><span class="grow">انقضای کلید</span><span class="pill" id="s-exp"></span></div>
+      <div class="seg" id="s-exp-seg" role="group" aria-label="انقضای کلید">
+        <button data-in="1h">۱ ساعت</button><button data-in="24h">۲۴ ساعت</button>
+        <button data-in="7d">۷ روز</button><button data-in="never">بدون انقضا</button>
+      </div>
+      <button class="btn block" id="s-rotate"></button>
+      <button class="btn danger block" id="s-off"></button>
+    </div>
+
+    <h2 class="sec"><span class="eyebrow">RELAYS</span>رله‌ها</h2>
+    <div class="card set" id="s-relays"></div>
+
+    <h2 class="sec"><span class="eyebrow">LOOK</span>ظاهر</h2>
+    <div class="card">
+      <div class="seg" id="s-theme" role="group" aria-label="تم">
+        <button data-t="auto">خودکار</button><button data-t="dark">تیره</button><button data-t="light">روشن</button>
+      </div>
+    </div>
+
+    <h2 class="sec"><span class="eyebrow">ABOUT</span>درباره</h2>
+    <div class="card"><dl class="kv" id="s-about"></dl></div>
+  </section>
+</main>
+
+<nav class="tabs" id="tabs" aria-label="بخش‌ها">
+  <button data-v="home"></button>
+  <button data-v="term"></button>
+  <button data-v="files"></button>
+  <button data-v="activity"></button>
+  <button data-v="settings"></button>
+</nav>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script nonce="{{NONCE}}">
+"use strict";
+/* ------------------------------------------------------------------ basics */
+const BASE = location.pathname.replace(/\/panel\/?$/, "");
+const KEY = location.origin + BASE;
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+
+const I = {
+  logo: '<path d="M4 6.5 9 12l-5 5.5"/><path d="M12.5 18H20"/><path d="M17 4.5l.9 2.3 2.3.9-2.3.9L17 10.9l-.9-2.3-2.3-.9 2.3-.9z"/>',
+  home: '<path d="M3 11.2 12 4l9 7.2"/><path d="M5.5 9.8V20h13V9.8"/><path d="M10 20v-5.5h4V20"/>',
+  term: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7.5 9 3 3-3 3"/><path d="M12.5 15h4"/>',
+  folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.2h7.5A2.5 2.5 0 0 1 21 9.7v7.8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/>',
+  activity: '<path d="M3 12h4l2.5-6.5 5 13L17 12h4"/>',
+  settings: '<path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="17" r="2"/>',
+  copy: '<rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6.5A2.5 2.5 0 0 1 7.5 4H15"/>',
+  eye: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',
+  eyeoff: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/>',
+  play: '<path d="M8 5.5v13l10.5-6.5z"/>',
+  stop: '<rect x="6.5" y="6.5" width="11" height="11" rx="2"/>',
+  refresh: '<path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4.5V9h-4.5"/>',
+  upload: '<path d="M12 15.5V4.5"/><path d="m7.5 9 4.5-4.5L16.5 9"/><path d="M4.5 15.5v3a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5v-3"/>',
+  download: '<path d="M12 4.5v11"/><path d="m7.5 11 4.5 4.5 4.5-4.5"/><path d="M4.5 15.5v3a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5v-3"/>',
+  up: '<path d="M12 19V5.5"/><path d="m6 11.5 6-6 6 6"/>',
+  go: '<path d="M5 12h13"/><path d="m12 6 6 6-6 6"/>',
+  file: '<path d="M14 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5"/>',
+  link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  key: '<circle cx="8" cy="15" r="4.5"/><path d="m11.2 11.8 8.3-8.3"/><path d="m16.5 6.5 2.5 2.5"/>',
+  shield: '<path d="M12 3.5 19.5 6v5.5c0 4.6-3.2 7.8-7.5 9-4.3-1.2-7.5-4.4-7.5-9V6z"/><path d="m9 12 2.2 2.2L15.5 10"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  power: '<path d="M12 3.5V12"/><path d="M6.6 7.3a7.5 7.5 0 1 0 10.8 0"/>',
+  cpu: '<rect x="6.5" y="6.5" width="11" height="11" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><path d="M9.5 3v2.5M14.5 3v2.5M9.5 18.5V21M14.5 18.5V21M3 9.5h2.5M3 14.5h2.5M18.5 9.5H21M18.5 14.5H21"/>',
+  route: '<circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.5"/>',
+  check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+  x: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
+  moon: '<path d="M19.5 14.5A8 8 0 1 1 9.5 4.5a6.5 6.5 0 0 0 10 10z"/>',
+  spark: '<path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"/><path d="M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/>',
+  edit: '<path d="M4.5 19.5h4l10-10-4-4-10 10z"/><path d="m13 7 4 4"/>',
+  plug: '<path d="M9 3.5v5M15 3.5v5"/><path d="M6.5 8.5h11V12a5.5 5.5 0 0 1-11 0z"/><path d="M12 17.5v3"/>',
+  disk: '<rect x="3.5" y="5" width="17" height="14" rx="3"/><path d="M3.5 14h17"/><circle cx="16.5" cy="16.5" r=".8"/>',
+  mem: '<rect x="3.5" y="7" width="17" height="10" rx="2"/><path d="M7.5 10v4M11 10v4M14.5 10v4M7 17v2.5M12 17v2.5M17 17v2.5"/>',
+  list: '<path d="M8.5 7h11M8.5 12h11M8.5 17h11"/><circle cx="4.8" cy="7" r="1"/><circle cx="4.8" cy="12" r="1"/><circle cx="4.8" cy="17" r="1"/>',
+  bolt: '<path d="M13 3 5.5 13.5H12l-1 7.5 7.5-10.5H12z"/>',
+  layers: '<path d="m12 4 8.5 4.5L12 13 3.5 8.5z"/><path d="m3.5 12.5 8.5 4.5 8.5-4.5"/><path d="m3.5 16.5 8.5 4 8.5-4"/>',
+  alert: '<path d="M12 4 21 19.5H3z"/><path d="M12 10v4.5M12 17.2v.3"/>',
+  box: '<path d="m12 3.5 8 4.5v8L12 20.5 4 16V8z"/><path d="m4 8 8 4.5L20 8M12 12.5v8"/>'
+};
+const svg = (n) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${I[n] || ""}</svg>`;
+function ico(el, n) { el.innerHTML = svg(n); return el; }
+function btnLabel(el, n, text) { el.innerHTML = svg(n); el.append(document.createTextNode(text)); return el; }
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k === "icon") el.innerHTML = svg(v);
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) el.append(c.nodeType ? c : document.createTextNode(String(c)));
+  return el;
+}
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("fatllm." + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem("fatllm." + k, JSON.stringify(v)); } catch (e) { /* private mode */ } }
+};
+
+/* ------------------------------------------------------------------ formatting */
+const fa = (n, opts) => Number(n).toLocaleString("fa-IR", opts);
+function bytes(b) {
+  if (b == null) return "—";
+  const u = ["بایت", "کیلوبایت", "مگابایت", "گیگ", "ترابایت"];
+  let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return fa(i && b < 10 ? Math.round(b * 10) / 10 : Math.round(b)) + " " + u[i];
+}
+function duration(s) {
+  if (s == null) return "—";
+  const d = Math.floor(s / 86400), hh = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  if (d) return fa(d) + " روز" + (hh ? " و " + fa(hh) + " ساعت" : "");
+  if (hh) return fa(hh) + " ساعت" + (m ? " و " + fa(m) + " دقیقه" : "");
+  return fa(Math.max(m, 1)) + " دقیقه";
+}
+function ago(t) {
+  const s = Math.round((Date.now() - t) / 1000);
+  if (s < 45) return "همین الان";
+  if (s < 3600) return fa(Math.round(s / 60)) + " دقیقه پیش";
+  if (s < 86400) return fa(Math.round(s / 3600)) + " ساعت پیش";
+  return fa(Math.round(s / 86400)) + " روز پیش";
+}
+function until(t) {
+  const s = Math.round((t - Date.now()) / 1000);
+  if (s <= 0) return "منقضی شده";
+  if (s < 3600) return fa(Math.max(1, Math.round(s / 60))) + " دقیقه دیگر";
+  if (s < 86400) return fa(Math.round(s / 3600)) + " ساعت دیگر";
+  return fa(Math.round(s / 86400)) + " روز دیگر";
+}
+const when = (t) => new Date(t).toLocaleString("fa-IR", { dateStyle: "medium", timeStyle: "short" });
+const MODES = { caddy: "HTTPS با گواهی واقعی", direct: "HTTPS مستقیم", tunnel: "تونل Cloudflare" };
+const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+
+/* ------------------------------------------------------------------ ui helpers */
+let toastTimer;
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 2400);
+}
+async function copy(text, what) {
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) {
+    const ta = h("textarea", { style: "position:fixed;opacity:0" }); ta.value = text;
+    document.body.append(ta); ta.select(); try { document.execCommand("copy"); } catch (e2) { /* ignore */ } ta.remove();
+  }
+  toast((what || "متن") + " کپی شد");
+}
+function sheet(build) {
+  const ov = h("div", { class: "overlay", role: "dialog", "aria-modal": "true" });
+  const box = h("div", { class: "sheet" });
+  ov.append(box);
+  const close = () => { ov.remove(); document.removeEventListener("keydown", onKey); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
+  document.addEventListener("keydown", onKey);
+  build(box, close);
+  document.body.append(ov);
+  const f = box.querySelector("button, textarea, input"); if (f) f.focus();
+  return close;
+}
+function confirmBox({ title, text, ok, danger }) {
+  return new Promise((resolve) => {
+    sheet((box, close) => {
+      const done = (v) => { close(); resolve(v); };
+      box.append(h("h3", { text: title }), h("p", { text: text }),
+        h("div", { class: "acts" },
+          h("button", { class: "btn" + (danger ? " danger solid" : " primary"), text: ok || "تأیید", onclick: () => done(true) }),
+          h("button", { class: "btn", text: "انصراف", onclick: () => done(false) })));
+    });
+  });
+}
+
+/* ------------------------------------------------------------------ api */
+let dead = false;
+async function api(path, opts) {
+  const r = await fetch(BASE + path, Object.assign({ cache: "no-store" }, opts || {}));
+  if (r.status === 404 && /^\/(stats|audit|jobs)/.test(path)) fatal("bad");
+  return r;
+}
+async function apiJSON(path, opts) {
+  const r = await api(path, opts);
+  let data = null;
+  try { data = await r.json(); } catch (e) { /* not json */ }
+  if (!r.ok) throw new Error((data && data.error) || ("خطای " + r.status));
+  return data;
+}
+function fatal(kind) {
+  if (dead) return; dead = true;
+  const off = kind === "off";
+  document.body.innerHTML = "";
+  const card = h("div", { class: "card" },
+    h("div", { icon: off ? "power" : "key" }),
+    h("h3", { text: off ? "دسترسی خاموش شد" : "این کلید معتبر نیست" }),
+    h("p", { class: "muted", text: off
+      ? "تا وقتی روی سرور «fatllm on» را نزنی، هیچ‌کس با این کلید وصل نمی‌شود."
+      : "کلید عوض شده، منقضی شده یا دسترسی خاموش است. روی سرور «fatllm key» را بزن و لینک تازه را باز کن." }));
+  document.body.append(h("div", { class: "fatal" }, card));
+}
+
+/* ------------------------------------------------------------------ theme */
+function applyTheme(t) {
+  if (t === "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", t);
+  const dark = t === "dark" || (t === "auto" && !matchMedia("(prefers-color-scheme: light)").matches);
+  ico($("#theme-btn"), dark ? "sun" : "moon");
+  $$("#s-theme button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.t === t)));
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = dark ? "#070b16" : "#f2f5fb";
+}
+let theme = store.get("theme", "auto");
+applyTheme(theme);
+$("#theme-btn").onclick = () => {
+  const dark = document.documentElement.getAttribute("data-theme") === "dark" ||
+    (!document.documentElement.getAttribute("data-theme") && !matchMedia("(prefers-color-scheme: light)").matches);
+  theme = dark ? "light" : "dark"; store.set("theme", theme); applyTheme(theme);
+};
+$$("#s-theme button").forEach((b) => b.onclick = () => { theme = b.dataset.t; store.set("theme", theme); applyTheme(theme); });
+
+/* ------------------------------------------------------------------ router */
+const TABS = { home: ["home", "خانه"], term: ["term", "ترمینال"], files: ["folder", "فایل‌ها"], activity: ["activity", "فعالیت"], settings: ["settings", "تنظیمات"] };
+$$("#tabs button").forEach((b) => {
+  const [icon, label] = TABS[b.dataset.v];
+  b.innerHTML = svg(icon); b.append(h("span", { text: label }));
+  b.onclick = () => go(b.dataset.v);
+});
+let view = "";
+function go(v, anchor) {
+  if (!TABS[v]) v = "home";
+  if (location.hash !== "#" + v) history.replaceState(null, "", "#" + v);
+  view = v;
+  $$(".view").forEach((s) => { s.hidden = s.id !== "v-" + v; });
+  $$("#tabs button").forEach((b) => { if (b.dataset.v === v) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current"); });
+  if (anchor) { const el = document.getElementById(anchor); if (el) setTimeout(() => el.scrollIntoView({ behavior: "smooth", block: "start" }), 50); }
+  else window.scrollTo({ top: 0 });
+  if (v === "home") loadStats();
+  if (v === "files" && !filesLoaded) openPath(store.get("path", "/root"));
+  if (v === "activity") loadActivity();
+  if (v === "settings") renderSettings();
+  if (v === "term") setTimeout(() => $("#t-cmd").focus({ preventScroll: true }), 80);
+}
+window.addEventListener("hashchange", () => { const v = location.hash.slice(1); if (v && v !== view) go(v); });
+
+/* ------------------------------------------------------------------ home */
+let S = null;
+function ring(el, pct, label, sub, iconName) {
+  const r = 34, c = 2 * Math.PI * r, p = Math.max(0, Math.min(100, pct || 0));
+  const color = p < 60 ? "var(--ok)" : p < 85 ? "var(--warn)" : "var(--danger)";
+  el.innerHTML = "";
+  const wrap = h("div", { class: "ring" });
+  wrap.innerHTML = `<svg viewBox="0 0 84 84" aria-hidden="true"><circle class="t" cx="42" cy="42" r="${r}"/><circle class="v" cx="42" cy="42" r="${r}" stroke-dasharray="${c}" stroke-dashoffset="${c}" style="stroke:${color}"/></svg>`;
+  wrap.append(h("div", { class: "val", text: pct == null ? "—" : fa(Math.round(p)) + "٪" }));
+  el.append(wrap, h("div", { class: "lbl", text: label }), h("div", { class: "sub", text: sub }));
+  requestAnimationFrame(() => requestAnimationFrame(() => { wrap.querySelector("circle.v").style.strokeDashoffset = String(c * (1 - p / 100)); }));
+  el.setAttribute("aria-label", label + ": " + (pct == null ? "نامعلوم" : Math.round(p) + "%"));
+}
+function mini(iconName, value, label) {
+  return h("div", { class: "card mini" }, h("div", { class: "ico", icon: iconName }), h("div", {}, h("b", { text: value }), h("span", { text: label })));
+}
+async function loadStats() {
+  let s;
+  try { s = await apiJSON("/stats"); }
+  catch (e) {
+    $("#top-status").className = "pill bad"; $("#top-status span").textContent = "قطع";
+    return;
+  }
+  S = s;
+  $("#top-host").textContent = s.hostname + " · " + s.os;
+  $("#t-who").textContent = "root@" + s.hostname;
+  const st = $("#top-status");
+  st.className = "pill ok"; $("span", st).textContent = "آنلاین";
+  $("#h-host").textContent = s.hostname;
+  $("#h-os").replaceChildren(h("bdi", { text: s.os }), " · ", h("bdi", { text: s.arch }), " · کرنل ", h("bdi", { text: s.kernel }));
+  $("#h-uptime").innerHTML = svg("clock"); $("#h-uptime").append("روشن از " + duration(s.uptime_s));
+  $("#h-mode").innerHTML = svg("shield"); $("#h-mode").append(MODES[s.mode] || s.mode);
+  $("#h-exp").innerHTML = svg("key");
+  $("#h-exp").append(s.expires ? "کلید " + until(s.expires * 1000) : "کلید بدون انقضا");
+
+  const load1 = s.load && s.load.length ? s.load[0] : null;
+  ring($("#r-cpu"), load1 == null ? null : load1 / s.cpus * 100, "پردازنده", "بار " + (load1 == null ? "—" : fa(load1)) + " · " + fa(s.cpus) + " هسته");
+  const memUsed = s.mem_total && s.mem_available != null ? s.mem_total - s.mem_available : null;
+  ring($("#r-mem"), memUsed == null ? null : memUsed / s.mem_total * 100, "حافظه", memUsed == null ? "" : bytes(memUsed) + " از " + bytes(s.mem_total));
+  const diskUsed = s.disk_total ? s.disk_total - s.disk_free : null;
+  ring($("#r-disk"), diskUsed == null ? null : diskUsed / s.disk_total * 100, "دیسک", diskUsed == null ? "" : bytes(diskUsed) + " از " + bytes(s.disk_total));
+
+  const up = s.relays.filter((r) => r.up).length;
+  const m = $("#minis"); m.innerHTML = "";
+  m.append(
+    mini("bolt", fa(s.jobs_running), "دستور در حال اجرا"),
+    mini("route", s.relays.length ? fa(up) + " از " + fa(s.relays.length) : "—", "رله‌ی فعال"),
+    mini("mem", s.swap_total ? bytes(s.swap_total - s.swap_free) : "—", "Swap مصرفی"),
+    mini("layers", "v" + s.agent, "نسخه‌ی FATLLM"));
+
+  const sel = $("#t-via"), cur = sel.value;
+  sel.innerHTML = ""; sel.append(h("option", { value: "", text: "مستقیم" }));
+  for (const r of s.relays) sel.append(h("option", { value: r.name, text: "از طریق " + r.name }));
+  sel.value = s.relays.some((r) => r.name === cur) ? cur : "";
+  sel.hidden = !s.relays.length;
+}
+
+const ACTIONS = [
+  ["cpu", "وضعیت کلی", "uptime; echo; free -h; echo; df -h -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null || df -h"],
+  ["activity", "پردازش‌های سنگین", "ps aux --sort=-%cpu | head -n 15"],
+  ["plug", "پورت‌های باز", "ss -tulpn 2>/dev/null | head -n 60 || netstat -tulpn"],
+  ["alert", "سرویس‌های خراب", "systemctl --failed --no-pager"],
+  ["download", "به‌روزرسانی‌ها", "if command -v apt >/dev/null; then apt list --upgradable 2>/dev/null | head -n 80; elif command -v dnf >/dev/null; then dnf -q check-update | head -n 80; else yum -q check-update | head -n 80; fi; true"],
+  ["list", "هشدارهای سیستم", "journalctl -p warning -n 60 --no-pager"],
+  ["box", "کانتینرهای داکر", "docker ps -a 2>/dev/null || echo 'docker is not installed'"],
+  ["power", "ری‌استارت سرور", "systemctl reboot", true]
+];
+for (const [icon, label, cmd, danger] of ACTIONS) {
+  const b = h("button", { class: "action" + (danger ? " danger" : ""), icon });
+  b.append(h("span", { text: label }));
+  b.onclick = async () => {
+    if (danger && !await confirmBox({ title: "ری‌استارت سرور؟", text: "سرور چند دقیقه در دسترس نیست. کارهای در حال اجرا قطع می‌شوند.", ok: "ری‌استارت", danger: true })) return;
+    go("term"); runCmd(cmd);
+  };
+  $("#actions").append(b);
+}
+ico($("#cta-ico"), "spark");
+$("#cta-connect").onclick = () => go("settings", "connect");
+$("#cta-connect").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go("settings", "connect"); } };
+ico($("#logo"), "logo");
+
+/* ------------------------------------------------------------------ terminal */
+const out = $("#t-out");
+btnLabel($("#t-run"), "play", "اجرا");
+btnLabel($("#t-stop"), "stop", "توقف");
+ico($("#t-clear"), "x");
+let busy = false, curJob = null;
+function termAppend(node) {
+  const empty = out.querySelector(".term-empty"); if (empty) empty.remove();
+  out.append(node);
+  while (out.textContent.length > 400000 && out.firstChild) out.firstChild.remove();
+  out.scrollTop = out.scrollHeight;
+}
+function prompt(cmd, via) {
+  const p = h("div", { class: "p" });
+  p.append("$ ");
+  if (via) p.append(h("span", { class: "via", text: "[via " + via + "] " }));
+  p.append(cmd);
+  termAppend(p);
+}
+function setRunning(on) {
+  busy = on;
+  const run = $("#t-run");
+  run.disabled = on;
+  run.innerHTML = on ? '<span class="spin" aria-hidden="true"></span>' : svg("play");
+  run.append(document.createTextNode(on ? "در حال اجرا…" : "اجرا"));
+  $("#t-stop").hidden = !on;
+}
+function pushHist(cmd) {
+  let hist = store.get("hist", []).filter((c) => c !== cmd);
+  hist.unshift(cmd); hist = hist.slice(0, 12); store.set("hist", hist); renderHist();
+}
+function renderHist() {
+  const box = $("#t-hist"); box.innerHTML = "";
+  for (const c of store.get("hist", [])) {
+    box.append(h("button", { class: "chip btnlike", text: c.length > 60 ? c.slice(0, 60) + "…" : c, title: c,
+      onclick: () => { $("#t-cmd").value = c; $("#t-cmd").focus(); } }));
+  }
+}
+async function runCmd(cmd, viaOverride) {
+  cmd = (cmd || "").trim();
+  if (!cmd || busy) return;
+  const via = viaOverride !== undefined ? viaOverride : $("#t-via").value;
+  setRunning(true); prompt(cmd, via); pushHist(cmd);
+  const block = h("span"); termAppend(block);
+  const add = (t) => { if (t) { block.append(stripAnsi(t)); out.scrollTop = out.scrollHeight; } };
+  try {
+    let j = await apiJSON("/run", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cmd, wait: 2, via: via || undefined }) });
+    curJob = j.job; add(j.output);
+    let off = j.next_offset;
+    while (!j.done) {
+      j = await apiJSON("/job/" + j.job + "?json=1&wait=8&offset=" + off);
+      add(j.output); off = j.next_offset;
+    }
+    const ok = j.exit_code === 0;
+    termAppend(h("div", { class: ok ? "e0" : "e1",
+      text: (block.textContent && !block.textContent.endsWith("\n") ? "\n" : "") +
+        (ok ? "✓ " : "✗ ") + "exit " + j.exit_code + (j.killed ? " (stopped)" : "") + " · " + j.seconds + "s\n" }));
+  } catch (e) {
+    termAppend(h("div", { class: "e1", text: "\n✗ " + (e.message || "اتصال قطع شد") + "\n" }));
+  } finally {
+    curJob = null; setRunning(false);
+  }
+}
+$("#t-run").onclick = () => { const c = $("#t-cmd").value; runCmd(c); $("#t-cmd").value = ""; };
+$("#t-cmd").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $("#t-run").click(); } });
+$("#t-stop").onclick = async () => { if (curJob) { try { await api("/job/" + curJob + "/kill", { method: "POST" }); toast("دستور متوقف شد"); } catch (e) { /* ignore */ } } };
+$("#t-clear").onclick = () => { out.innerHTML = ""; out.append(h("div", { class: "term-empty", text: "صفحه پاک شد." })); };
+renderHist();
+
+/* ------------------------------------------------------------------ files */
+let filesLoaded = false, cwd = "/root";
+ico($("#f-up"), "up"); ico($("#f-go"), "go"); ico($("#f-refresh"), "refresh");
+btnLabel($("#f-upload"), "upload", "آپلود فایل");
+const enc = encodeURIComponent;
+const joinPath = (d, n) => (d.endsWith("/") ? d : d + "/") + n;
+async function openPath(path) {
+  path = (path || "/").trim() || "/";
+  const list = $("#f-list");
+  list.innerHTML = ""; list.append(h("li", { class: "empty" }, h("span", { class: "spin" })));
+  let r;
+  try { r = await api("/file?json=1&path=" + enc(path)); }
+  catch (e) { list.innerHTML = ""; list.append(h("li", { class: "empty", text: "اتصال قطع شد" })); return; }
+  const type = r.headers.get("content-type") || "";
+  if (r.ok && !type.includes("json")) {  // it is a file
+    const dir = path.replace(/\/[^/]*$/, "") || "/";
+    await openPath(dir); viewFile(path, null); return;
+  }
+  let d = null; try { d = await r.json(); } catch (e) { /* ignore */ }
+  if (!r.ok) { list.innerHTML = ""; list.append(h("li", { class: "empty", text: (d && d.error) || "این مسیر پیدا نشد" })); return; }
+  filesLoaded = true; cwd = d.path; store.set("path", cwd); $("#f-path").value = cwd;
+  list.innerHTML = "";
+  if (!d.entries.length) list.append(h("li", { class: "empty" }, h("span", { icon: "folder" }), "این پوشه خالی است"));
+  for (const e of d.entries) {
+    const full = joinPath(d.path, e.name);
+    const meta = e.dir ? "پوشه" : bytes(e.size);
+    const li = h("li", { class: "item tap", tabindex: "0", role: "button" },
+      h("div", { class: "ico " + (e.dir ? "dir" : "file"), icon: e.link ? "link" : e.dir ? "folder" : "file" }),
+      h("div", { class: "grow" },
+        h("div", { class: "t mono", text: e.name }),
+        h("div", { class: "m" }, meta + " · " + ago(e.mtime * 1000) + " · ", h("span", { class: "ltr", text: e.mode }))));
+    const act = () => e.dir ? openPath(full) : viewFile(full, e.size);
+    li.onclick = act; li.onkeydown = (ev) => { if (ev.key === "Enter") act(); };
+    list.append(li);
+  }
+  if (d.truncated) list.append(h("li", { class: "empty small", text: "فقط بخشی از فایل‌ها نشان داده شد." }));
+}
+$("#f-go").onclick = () => openPath($("#f-path").value);
+$("#f-path").addEventListener("keydown", (e) => { if (e.key === "Enter") openPath($("#f-path").value); });
+$("#f-up").onclick = () => openPath(cwd.replace(/\/[^/]+\/?$/, "") || "/");
+$("#f-refresh").onclick = () => openPath(cwd);
+$("#f-upload").onclick = () => $("#f-file").click();
+$("#f-file").onchange = async (ev) => {
+  const files = [...ev.target.files]; ev.target.value = "";
+  for (const f of files) {
+    toast("در حال آپلود " + f.name + " …");
+    try {
+      const r = await api("/file?path=" + enc(joinPath(cwd, f.name)), { method: "PUT", body: f });
+      if (!r.ok) throw new Error(await r.text());
+      toast(f.name + " آپلود شد");
+    } catch (e) { toast("آپلود " + f.name + " نشد"); }
+  }
+  openPath(cwd);
+};
+function download(path) {
+  const a = h("a", { href: BASE + "/file?download=1&path=" + enc(path), download: path.split("/").pop() });
+  document.body.append(a); a.click(); a.remove();
+}
+async function viewFile(path, size) {
+  const name = path.split("/").pop();
+  sheet(async (box, close) => {
+    box.classList.add("viewer");
+    const body = h("div", {}, h("div", { class: "empty" }, h("span", { class: "spin" })));
+    const acts = h("div", { class: "acts" });
+    box.append(h("h3", { class: "ltr", style: "text-align:right", text: name }),
+      h("p", { class: "ltr small", style: "text-align:right", text: path }), body, acts);
+    const dl = h("button", { class: "btn", onclick: () => download(path) }); btnLabel(dl, "download", "دانلود");
+    const cl = h("button", { class: "btn", text: "بستن", onclick: close });
+    if (size != null && size > 2 * 1024 * 1024) {
+      body.innerHTML = ""; body.append(h("div", { class: "note info", text: "این فایل بزرگ است (" + bytes(size) + ")؛ برای دیدنش دانلودش کن." }));
+      acts.append(dl, cl); return;
+    }
+    let buf;
+    try { const r = await api("/file?path=" + enc(path)); if (!r.ok) throw new Error(await r.text()); buf = new Uint8Array(await r.arrayBuffer()); }
+    catch (e) { body.innerHTML = ""; body.append(h("div", { class: "note", text: "خوانده نشد: " + (e.message || "") })); acts.append(cl); return; }
+    if (buf.subarray(0, 8192).includes(0)) {
+      body.innerHTML = ""; body.append(h("div", { class: "note info", text: "فایل باینری است (" + bytes(buf.length) + ")." }));
+      acts.append(dl, cl); return;
+    }
+    const text = new TextDecoder("utf-8").decode(buf);
+    const pre = h("pre", { text }); body.innerHTML = ""; body.append(pre);
+    const ed = h("button", { class: "btn primary" }); btnLabel(ed, "edit", "ویرایش");
+    ed.onclick = () => {
+      const ta = h("textarea", { class: "mono", spellcheck: "false" }); ta.value = text;
+      body.innerHTML = ""; body.append(ta); ta.focus();
+      ed.innerHTML = svg("check"); ed.append("ذخیره");
+      ed.onclick = async () => {
+        ed.disabled = true;
+        try {
+          const r = await api("/file?path=" + enc(path), { method: "PUT", body: ta.value });
+          if (!r.ok) throw new Error(await r.text());
+          toast("ذخیره شد"); close(); openPath(cwd);
+        } catch (e) { toast("ذخیره نشد"); ed.disabled = false; }
+      };
+    };
+    acts.append(ed, dl, cl);
+  });
+}
+
+/* ------------------------------------------------------------------ activity */
+ico($("#a-refresh"), "refresh");
+let aFilter = "all", aData = null;
+$$("#a-seg button").forEach((b) => b.onclick = () => {
+  aFilter = b.dataset.f; $$("#a-seg button").forEach((x) => x.setAttribute("aria-pressed", String(x === b))); renderActivity();
+});
+$("#a-refresh").onclick = () => loadActivity();
+const CAT = { run: "run", kill: "run", download: "file", upload: "file", read: "file", expire: "sec", rotate: "sec", off: "sec" };
+async function loadActivity() {
+  try {
+    const [a, j] = await Promise.all([apiJSON("/audit?n=400"), apiJSON("/jobs?json=1")]);
+    aData = { audit: a.entries, jobs: j.jobs };
+  } catch (e) { aData = { audit: [], jobs: [], error: true }; }
+  renderActivity();
+}
+function renderActivity() {
+  if (!aData) return;
+  const run = $("#a-running"); run.innerHTML = "";
+  const active = aData.jobs.filter((j) => !j.done);
+  if (active.length) {
+    run.append(h("h2", { class: "sec" }, h("span", { class: "eyebrow", text: "RUNNING" }), "در حال اجرا"));
+    const ul = h("ul", { class: "list" });
+    for (const j of active) {
+      const stop = h("button", { class: "btn danger", "aria-label": "توقف", onclick: async () => { await api("/job/" + j.id + "/kill", { method: "POST" }); toast("متوقف شد"); setTimeout(loadActivity, 600); } });
+      btnLabel(stop, "stop", "توقف");
+      ul.append(h("li", { class: "item" }, h("div", { class: "ico run" }, h("span", { class: "spin" })),
+        h("div", { class: "grow" }, h("div", { class: "cmd", text: j.command }), h("div", { class: "m", text: "از " + duration(j.seconds) + " پیش" })), stop));
+    }
+    run.append(ul);
+  }
+  const exits = {};
+  for (const e of aData.audit) {
+    if (e.action !== "done") continue;
+    const m = /^job=(\w+) exit=(-?\d+)/.exec(e.detail); if (m) exits[m[1]] = Number(m[2]);
+  }
+  const list = $("#a-list"); list.innerHTML = "";
+  const items = aData.audit.filter((e) => e.action !== "done" && (aFilter === "all" || CAT[e.action] === aFilter));
+  if (aData.error) { list.append(h("li", { class: "empty", text: "خوانده نشد" })); return; }
+  if (!items.length) { list.append(h("li", { class: "empty" }, h("span", { icon: "activity" }), "هنوز چیزی ثبت نشده")); return; }
+  for (const e of items.slice(0, 250)) {
+    const t = Date.parse(e.time);
+    let title, body = null, badge = null, iconName = "activity", cls = "run";
+    if (e.action === "run") {
+      const m = /^job=(\w+) cwd=(\S+)(?: via=(\S+))? cmd=([\s\S]*)$/.exec(e.detail) || [];
+      title = m[3] ? "دستور از طریق " + m[3] : "اجرای دستور";
+      body = m[4] || e.detail; iconName = "term";
+      if (m[1] in exits) badge = h("span", { class: "badge " + (exits[m[1]] === 0 ? "ok" : "bad"), text: exits[m[1]] === 0 ? "موفق" : "خطا " + fa(exits[m[1]]) });
+      else badge = h("span", { class: "badge run", text: "در جریان" });
+    } else if (e.action === "kill") { title = "توقف دستور"; iconName = "stop"; }
+    else if (e.action === "download" || e.action === "read") { title = "خواندن فایل"; body = e.detail; iconName = "download"; cls = "file"; }
+    else if (e.action === "upload") { title = "نوشتن فایل"; body = e.detail; iconName = "upload"; cls = "file"; }
+    else if (e.action === "expire") { title = "تغییر انقضای کلید"; body = e.detail === "never" ? "بدون انقضا" : when(Date.parse(e.detail)); iconName = "clock"; cls = "sec"; }
+    else if (e.action === "rotate") { title = "کلید تازه ساخته شد"; iconName = "key"; cls = "sec"; }
+    else if (e.action === "off") { title = "دسترسی خاموش شد"; iconName = "power"; cls = "sec"; }
+    else { title = e.action; body = e.detail; }
+    const li = h("li", { class: "item tap" },
+      h("div", { class: "ico " + cls, icon: iconName }),
+      h("div", { class: "grow" },
+        h("div", { class: "row", style: "gap:8px" }, h("span", { class: "t grow", text: title }), badge),
+        body ? h("div", { class: "cmd", text: body }) : null,
+        h("div", { class: "m", title: when(t) }, ago(t) + " · ", h("span", { class: "ltr", text: e.ip }))));
+    li.onclick = () => li.classList.toggle("open");
+    list.append(li);
+  }
+}
+
+/* ------------------------------------------------------------------ settings */
+let keyShown = false;
+const masked = () => KEY.replace(/(fat_.{4}).+$/, "$1••••••••••••••••");
+function renderKey() {
+  $("#s-key").textContent = keyShown ? KEY : masked();
+  ico($("#s-key-eye"), keyShown ? "eyeoff" : "eye");
+  $("#s-key-eye").setAttribute("aria-label", keyShown ? "پنهان کردن کلید" : "نمایش کلید");
+}
+$("#s-key-eye").onclick = () => { keyShown = !keyShown; renderKey(); };
+ico($("#s-key-copy"), "copy"); $("#s-key-copy").onclick = () => copy(KEY, "کلید");
+$("#s-mcp").textContent = KEY + "/mcp";
+ico($("#s-mcp-copy"), "copy"); $("#s-mcp-copy").onclick = () => copy(KEY + "/mcp", "آدرس MCP");
+btnLabel($("#s-msg-copy"), "copy", "کپی پیام آماده برای ایجنت");
+$("#s-msg-copy").onclick = () => copy("FATLLM key: " + KEY, "پیام آماده");
+ico($("#pi1"), "term"); ico($("#pi2"), "spark"); ico($("#pi3"), "spark"); ico($("#pi4"), "plug");
+btnLabel($("#s-rotate"), "key", "ساختن کلید تازه");
+btnLabel($("#s-off"), "power", "خاموش کردن دسترسی");
+renderKey();
+
+async function renderSettings() {
+  if (!S) await loadStats();
+  if (!S) return;
+  $("#s-direct-note").hidden = S.mode !== "direct";
+  const exp = $("#s-exp");
+  if (S.expires) { exp.className = "pill warn"; exp.innerHTML = '<i class="dot"></i>'; exp.append(until(S.expires * 1000)); exp.title = when(S.expires * 1000); }
+  else { exp.className = "pill ok"; exp.innerHTML = '<i class="dot"></i>'; exp.append("بدون انقضا"); exp.title = ""; }
+  // relays
+  const rb = $("#s-relays"); rb.innerHTML = "";
+  if (!S.relays.length) {
+    rb.append(h("div", { class: "muted small", text: "رله‌ای نداری. رله یعنی این سرور بعضی کارها را از طریق یک سرور دیگر انجام بدهد؛ مثلاً سایت‌های ایرانی از طریق سرور ایران." }),
+      h("div", { class: "label", text: "برای افزودن، روی سرور بزن:" }),
+      h("div", { class: "field" }, h("code", { text: "fatllm relay add --host <ip> --name iran" })));
+  }
+  for (const r of S.relays) {
+    const res = h("div", { class: "relay-out muted" });
+    const test = h("button", { class: "btn" }); btnLabel(test, "bolt", "تست");
+    test.onclick = async () => {
+      test.disabled = true; res.textContent = "در حال تست…";
+      try {
+        const q = (via) => apiJSON("/run", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cmd: "curl -s --max-time 20 https://api.ipify.org", wait: 30, via }) });
+        const [a, b] = await Promise.all([q(undefined), q(r.name)]);
+        res.textContent = "IP این سرور: " + (a.output.trim() || "?") + "   ←   از طریق " + r.name + ": " + (b.output.trim() || "کار نکرد");
+      } catch (e) { res.textContent = "تست نشد: " + e.message; }
+      test.disabled = false;
+    };
+    rb.append(h("div", {},
+      h("div", { class: "row" },
+        h("span", { class: "pill " + (r.up ? "ok" : "bad") }, h("i", { class: "dot" }), r.up ? "فعال" : "قطع"),
+        h("div", { class: "grow" }, h("b", { text: r.name }), h("div", { class: "m muted small ltr", style: "text-align:right", text: r.host })), test),
+      res));
+  }
+  // about
+  const ab = $("#s-about"); ab.innerHTML = "";
+  const rows = [["سرور", S.hostname], ["سیستم‌عامل", S.os], ["حالت دسترسی", MODES[S.mode] || S.mode], ["آدرس", location.host], ["نسخه", "FATLLM " + S.agent]];
+  for (const [k, v] of rows) ab.append(h("dt", { text: k }), h("dd", { text: v }));
+}
+$$("#s-exp-seg button").forEach((b) => b.onclick = async () => {
+  try {
+    const r = await apiJSON("/admin/expire", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ in: b.dataset.in }) });
+    toast(r.expires ? "کلید " + until(r.expires * 1000) + " باطل می‌شود" : "کلید دیگر منقضی نمی‌شود");
+    if (!r.saved) toast("فقط تا ری‌استارت سرویس ماندگار است");
+    await loadStats(); renderSettings();
+  } catch (e) { toast(e.message); }
+});
+$("#s-rotate").onclick = async () => {
+  if (!await confirmBox({ title: "کلید تازه بسازم؟", text: "کلید فعلی همین الان باطل می‌شود. هر ایجنت یا کانکتوری که کلید قبلی را دارد باید کلید تازه را بگیرد.", ok: "بساز" })) return;
+  let r;
+  try { r = await apiJSON("/admin/rotate", { method: "POST" }); } catch (e) { toast(e.message); return; }
+  dead = true;  // the old key no longer works: stop background refreshes
+  sheet((box) => {
+    box.append(h("h3", { text: "کلید تازه آماده است" }),
+      h("p", { text: "این را کپی کن و به ایجنت‌ها بده. کلید قبلی دیگر کار نمی‌کند." }),
+      h("div", { class: "field" }, h("code", { text: r.key }), h("button", { class: "icon-btn", "aria-label": "کپی", icon: "copy", onclick: () => copy(r.key, "کلید تازه") })),
+      h("div", { class: "acts" }, h("button", { class: "btn primary", text: "رفتن به پنل با کلید تازه", onclick: () => location.replace(r.key + "/panel#settings") })));
+  });
+};
+$("#s-off").onclick = async () => {
+  if (!await confirmBox({ title: "دسترسی خاموش شود؟", text: "هیچ‌کس، حتی خودت، تا وقتی روی سرور «fatllm on» نزنی با این کلید وصل نمی‌شود.", ok: "خاموش کن", danger: true })) return;
+  try { await apiJSON("/admin/off", { method: "POST" }); fatal("off"); } catch (e) { toast(e.message); }
+};
+
+/* ------------------------------------------------------------------ start */
+go((location.hash || "#home").slice(1));
+setInterval(() => { if (!dead && view === "home" && !document.hidden) loadStats(); }, 10000);
+if (view !== "home") loadStats();
+</script>
+</body>
+</html>

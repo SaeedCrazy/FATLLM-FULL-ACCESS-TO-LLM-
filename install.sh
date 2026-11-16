@@ -111,10 +111,12 @@ fetch() {  # repo path -> local file
 fetch server/agent.py "$TMP/agent.py"
 fetch server/fatllm "$TMP/fatllm"
 fetch srv "$TMP/srv"
+fetch server/panel.html "$TMP/panel.html"
 "$PY" -m py_compile "$TMP/agent.py" || die "downloaded agent is broken; try again"
 bash -n "$TMP/fatllm" || die "downloaded fatllm script is broken; try again"
 install -m 0755 "$TMP/agent.py" "$APP/agent.py"
 install -m 0644 "$TMP/srv" "$APP/srv"
+install -m 0644 "$TMP/panel.html" "$APP/panel.html"
 install -m 0755 "$TMP/fatllm" /usr/local/bin/fatllm
 
 # ------------------------------------------------------------------ old settings
