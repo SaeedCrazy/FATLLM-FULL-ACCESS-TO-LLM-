@@ -6,7 +6,7 @@
 #
 # Options (after the command: bash <(curl ...) --domain my.example.com):
 #   --domain NAME   use your own domain (its DNS A record must point to this server)
-#   --port N        HTTPS port (default 443 if free, else 8443, 2053, 2083, 2087, 2096, 9443)
+#   --port N        HTTPS port (default 9001, or a random free one in 9002-9999; "random" picks one)
 #   --direct        serve HTTPS from the agent itself with a self-signed cert on a free port
 #                   (stable address, no port 80/443 or Cloudflare needed; works with Claude Code,
 #                   not with the claude.ai connector which needs a public certificate)
@@ -26,9 +26,14 @@ CONF=$CONF_DIR/fatllm.env
 STATE=/var/lib/fatllm
 LOGS=/var/log/fatllm
 
-say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
-die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+# Plain output until server/ui.sh (colours, logo, spinners) is loaded below.
+say() { printf '> %s\n' "$*"; }
+ok() { printf '+ %s\n' "$*"; }
+note() { printf '  %s\n' "$*"; }
+warn() { printf '! %s\n' "$*" >&2; }
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+ui_wait() { sleep "$2"; }
+ui_box() { printf '%s\n' "$2"; }
 
 # Not root? Run again through sudo, automatically.
 if [ "$(id -u)" != 0 ]; then
@@ -57,7 +62,27 @@ while [ $# -gt 0 ]; do
     *) die "unknown option: $1 (see --help)" ;;
   esac
 done
-[ -z "$PORT" ] || [[ "$PORT" =~ ^[0-9]+$ ]] || die "--port needs a number"
+[ -z "$PORT" ] || [ "$PORT" = random ] || { [[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; } \
+  || die "--port needs a number (1-65535) or 'random'"
+
+# ------------------------------------------------------------------ look
+SRC=""
+if [ "$LOCAL" = 1 ]; then
+  SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  [ -f "$SRC/server/agent.py" ] || die "--local: no server/agent.py next to install.sh"
+fi
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fetch() {  # repo path -> local file
+  if [ -n "$SRC" ]; then cp "$SRC/$1" "$2"
+  else curl -fsSL --retry 3 --max-time 60 "$RAW/$1" -o "$2" || die "download failed: $RAW/$1"; fi
+}
+if fetch server/ui.sh "$TMP/ui.sh" 2>/dev/null && bash -n "$TMP/ui.sh" 2>/dev/null; then
+  # shellcheck source=server/ui.sh
+  . "$TMP/ui.sh"
+  ui_init
+  ui_logo "installer · full server access for AI agents"
+fi
 
 # ------------------------------------------------------------------ checks
 command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || die "this server has no systemd; FATLLM needs it"
@@ -85,39 +110,33 @@ NEED=""
 command -v curl >/dev/null 2>&1 || NEED="$NEED curl"
 command -v python3 >/dev/null 2>&1 || NEED="$NEED python3"
 command -v tar >/dev/null 2>&1 || NEED="$NEED tar"
+os_pretty="$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | tr -d '"')"
+ok "System: ${os_pretty:-Linux} · $ARCH · $(hostname 2>/dev/null || echo server)"
 if [ -n "$NEED" ]; then
   say "Installing:$NEED"
   # shellcheck disable=SC2086
   pkg_install $NEED || die "could not install:$NEED (install them, then run this again)"
+  ok "Installed:$NEED"
 fi
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 6))' || die "python3 is older than 3.6"
 PY="$(command -v python3)"
 
 # ------------------------------------------------------------------ files
-say "Installing FATLLM files"
 mkdir -p "$APP" "$CONF_DIR" "$STATE/jobs" "$LOGS"
 chmod 700 "$CONF_DIR" "$STATE" "$LOGS"
-SRC=""
-if [ "$LOCAL" = 1 ]; then
-  SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  [ -f "$SRC/server/agent.py" ] || die "--local: no server/agent.py next to install.sh"
-fi
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-fetch() {  # repo path -> local file
-  if [ -n "$SRC" ]; then cp "$SRC/$1" "$2"
-  else curl -fsSL --retry 3 --max-time 60 "$RAW/$1" -o "$2" || die "download failed: $RAW/$1"; fi
-}
 fetch server/agent.py "$TMP/agent.py"
 fetch server/fatllm "$TMP/fatllm"
 fetch srv "$TMP/srv"
 fetch server/panel.html "$TMP/panel.html"
+[ -f "$TMP/ui.sh" ] || fetch server/ui.sh "$TMP/ui.sh"
 "$PY" -m py_compile "$TMP/agent.py" || die "downloaded agent is broken; try again"
 bash -n "$TMP/fatllm" || die "downloaded fatllm script is broken; try again"
 install -m 0755 "$TMP/agent.py" "$APP/agent.py"
 install -m 0644 "$TMP/srv" "$APP/srv"
 install -m 0644 "$TMP/panel.html" "$APP/panel.html"
+install -m 0644 "$TMP/ui.sh" "$APP/ui.sh"
 install -m 0755 "$TMP/fatllm" /usr/local/bin/fatllm
+ok "Files installed ($APP, command: fatllm)"
 
 # ------------------------------------------------------------------ old settings
 OLD_TOKEN="" OLD_MODE="" OLD_HOST="" OLD_PORT="" OLD_LOCAL="" OLD_EXPIRES="0" OLD_EMAIL=""
@@ -155,9 +174,22 @@ for fam, addr in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
 PY
 }
 
+pick_port() {  # 9001, else a random free port in 9002-9999 (away from 80/443 and common panels)
+  local p
+  if port_free 9001; then echo 9001; return 0; fi
+  for _ in $(seq 1 80); do
+    p=$(( 9002 + RANDOM % 998 ))
+    port_free "$p" && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
 TOKEN="$OLD_TOKEN"
 if [ "$NEW_KEY" = 1 ] || [ "${#TOKEN}" -lt 32 ]; then
   TOKEN="$("$PY" -c 'import secrets; print("fat_" + secrets.token_urlsafe(32))')"
+  ok "Key: made a new 256-bit key"
+else
+  ok "Key: kept your existing key"
 fi
 
 LOCAL_PORT="$OLD_LOCAL"
@@ -236,14 +268,16 @@ for _ in $(seq 1 20); do
   sleep 0.5
 done
 [ "$local_ok" = 1 ] || { journalctl -u fatllm -n 20 --no-pager >&2 || true; die "the agent did not start"; }
+ok "Agent running"
 
 # ------------------------------------------------------------------ public HTTPS
 open_port() {
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-    ufw allow "$1/tcp" >/dev/null 2>&1 || true
+    ufw allow "$1/tcp" >/dev/null 2>&1 && ok "Firewall (ufw): port $1 open" || true
   fi
   if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-    firewall-cmd -q --permanent --add-port="$1/tcp" >/dev/null 2>&1 && firewall-cmd -q --reload >/dev/null 2>&1 || true
+    firewall-cmd -q --permanent --add-port="$1/tcp" >/dev/null 2>&1 && firewall-cmd -q --reload >/dev/null 2>&1 \
+      && ok "Firewall (firewalld): port $1 open" || true
   fi
 }
 
@@ -304,26 +338,24 @@ setup_caddy() {  # 0 = working HTTPS with a real certificate
     host="${ip//./-}.sslip.io"
   fi
   port_free 80 && http_ok=1
-  if [ -n "$PORT" ]; then
+  if [ "$PORT" = random ]; then
+    port="$(pick_port)" || { warn "no free port"; return 1; }
+  elif [ -n "$PORT" ]; then
     port="$PORT"
     port_free "$port" || { warn "port $port is already in use"; return 1; }
   elif [ -n "$OLD_PORT" ] && [ "$OLD_MODE" = caddy ] && port_free "$OLD_PORT"; then
     port="$OLD_PORT"
   else
-    port=""
-    for p in 443 8443 2053 2083 2087 2096 9443; do
-      if port_free "$p"; then port="$p"; break; fi
-    done
-    [ -n "$port" ] || { warn "no free HTTPS port"; return 1; }
+    port="$(pick_port)" || { warn "no free port"; return 1; }
   fi
   if [ "$port" != 443 ] && [ "$http_ok" = 0 ]; then
-    warn "ports 80 and 443 are both busy, so no certificate can be issued here"
+    warn "port 80 is busy, so no public certificate can be issued here"
     return 1
   fi
   get_caddy || { warn "could not download Caddy"; return 1; }
 
   url="https://$host"; [ "$port" = 443 ] || url="$url:$port"
-  say "Setting up HTTPS on $url"
+  say "Trying a real certificate for $url"
   {
     echo "{"
     echo "	admin off"
@@ -362,17 +394,19 @@ EOF
   systemctl daemon-reload
   systemctl enable fatllm-caddy >/dev/null 2>&1
   systemctl restart fatllm-caddy
-  say "Getting a certificate (up to 3 minutes)"
-  for _ in $(seq 1 60); do
+  local i
+  for i in $(seq 1 60); do
     if curl -fsS --noproxy '*' --max-time 5 --resolve "$host:$port:127.0.0.1" "$url/$TOKEN/info" >/dev/null 2>&1; then
       write_conf caddy "$host" "$port" "$url"
       systemctl restart fatllm
+      ok "HTTPS with a real certificate: $url"
       return 0
     fi
-    sleep 3
+    ui_wait "Getting a certificate ($(( i * 3 ))s, up to 3 min)" 3
   done
-  warn "no certificate yet. Caddy says:"
-  journalctl -u fatllm-caddy -n 12 --no-pager 2>/dev/null | sed 's/^/   /' >&2 || true
+  warn "No certificate after 3 minutes. Caddy's last words:"
+  journalctl -u fatllm-caddy -n 3 --no-pager -o cat 2>/dev/null | cut -c1-$(( ${UI_COLS:-80} - 6 )) \
+    | while IFS= read -r l; do note "$l"; done || true
   systemctl disable --now fatllm-caddy >/dev/null 2>&1 || true
   return 1
 }
@@ -390,17 +424,15 @@ setup_direct() {  # 0 = the agent serves HTTPS itself with a self-signed cert on
   else warn "could not find this server's public IPv4"; return 1; fi
   command -v openssl >/dev/null 2>&1 || pkg_install openssl || { warn "openssl is needed for a self-signed certificate"; return 1; }
 
-  # Port 443 first: it is the one datacenter firewalls and national filters almost never block.
+  # Port: --port if free; else the previous one (keys stay the same); else 9001 or a random
+  # free one in 9002-9999, away from 80/443 so it never clashes with x-ui, nginx or Caddy.
   pub=""
-  if [ -n "$PORT" ]; then
+  if [ -n "$PORT" ] && [ "$PORT" != random ]; then
     if port_free "$PORT"; then pub="$PORT"; else warn "port $PORT is already in use; choosing another"; fi
+  elif [ -z "$PORT" ] && [ -n "$OLD_PORT" ] && [ "$OLD_MODE" = direct ] && port_free "$OLD_PORT"; then
+    pub="$OLD_PORT"
   fi
-  if [ -z "$pub" ]; then
-    for p in 443 "$OLD_PORT" 2053 2083 2087 2096 8443 9443; do
-      [ -n "$p" ] && port_free "$p" && { pub="$p"; break; }
-    done
-  fi
-  [ -n "$pub" ] || { warn "no free HTTPS port"; return 1; }
+  [ -n "$pub" ] || pub="$(pick_port)" || { warn "no free port"; return 1; }
 
   mkdir -p "$STATE/tls"; chmod 700 "$STATE/tls"
   crt="$STATE/tls/cert.pem"; key="$STATE/tls/key.pem"
@@ -409,9 +441,8 @@ setup_direct() {  # 0 = the agent serves HTTPS itself with a self-signed cert on
   # Keep a certificate that still covers the address, so clients that pinned it keep working.
   if [ -s "$crt" ] && [ -s "$key" ] && openssl x509 -in "$crt" -noout -checkend 2592000 >/dev/null 2>&1 \
       && openssl x509 -in "$crt" -noout -text 2>/dev/null | grep -qF "$want"; then
-    say "Keeping the existing certificate for $host"
+    ok "Certificate: kept the existing one for $host"
   else
-    say "Making a self-signed certificate for $host"
     cfg="$TMP/openssl.cnf"
     cat > "$cfg" <<CFG
 [req]
@@ -425,22 +456,22 @@ subjectAltName = $san
 CFG
     openssl req -x509 -newkey rsa:2048 -nodes -keyout "$key" -out "$crt" -days 3650 -config "$cfg" >/dev/null 2>&1 \
       || { warn "openssl could not make a certificate"; return 1; }
+    ok "Certificate: self-signed for $host (valid 10 years)"
   fi
   chmod 600 "$key" "$crt"
 
   url="https://$host"; [ "$pub" = 443 ] || url="$url:$pub"
-  say "Serving HTTPS directly on $url (self-signed)"
   systemctl disable --now fatllm-caddy fatllm-tunnel >/dev/null 2>&1 || true
   LOCAL_PORT="$pub"; CONF_LISTEN="0.0.0.0"; CONF_TLS_CERT="$crt"; CONF_TLS_KEY="$key"
   write_conf direct "$host" "$pub" "$url"
   open_port "$pub"
   systemctl restart fatllm
-  local ok=0
+  local up=0
   for _ in $(seq 1 20); do
-    if curl -fsS --insecure --noproxy '*' --max-time 5 "https://127.0.0.1:$pub/$TOKEN/info" >/dev/null 2>&1; then ok=1; break; fi
-    sleep 0.5
+    if curl -fsS --insecure --noproxy '*' --max-time 5 "https://127.0.0.1:$pub/$TOKEN/info" >/dev/null 2>&1; then up=1; break; fi
+    ui_wait "Starting HTTPS on port $pub" 1
   done
-  [ "$ok" = 1 ] && return 0
+  [ "$up" = 1 ] && { ok "HTTPS (self-signed) on $url"; return 0; }
   journalctl -u fatllm -n 15 --no-pager >&2 2>/dev/null || true
   warn "the agent did not come up with TLS"
   return 1
@@ -448,7 +479,6 @@ CFG
 
 setup_tunnel() {
   get_cloudflared || { warn "could not download cloudflared"; return 1; }
-  say "Starting a Cloudflare quick tunnel"
   cat > /etc/systemd/system/fatllm-tunnel.service <<EOF
 [Unit]
 Description=FATLLM tunnel (Cloudflare quick tunnel)
@@ -472,14 +502,14 @@ EOF
   for _ in $(seq 1 45); do
     url="$(grep -aoE 'https://[a-z0-9]+(-[a-z0-9]+)+\.trycloudflare\.com' "$STATE/tunnel.log" 2>/dev/null | tail -1 || true)"
     [ -n "$url" ] && break
-    sleep 1
+    ui_wait "Opening a Cloudflare tunnel" 1
   done
   [ -n "$url" ] || { warn "the tunnel gave no address"; tail -n 8 "$STATE/tunnel.log" >&2 2>/dev/null || true; return 1; }
   write_conf tunnel "" "" ""
   systemctl restart fatllm
   for _ in $(seq 1 30); do
-    curl -fsS --max-time 8 "$url/$TOKEN/info" >/dev/null 2>&1 && return 0
-    sleep 2
+    curl -fsS --max-time 8 "$url/$TOKEN/info" >/dev/null 2>&1 && { ok "Tunnel: $url"; return 0; }
+    ui_wait "Waiting for the tunnel to answer" 2
   done
   warn "tunnel address $url does not answer from here yet; it may need a minute"
   return 0
@@ -493,22 +523,18 @@ elif ! setup_caddy; then
   if [ -n "$DOMAIN" ]; then
     die "HTTPS for --domain $DOMAIN did not work (see above). Fix its DNS/ports, or use --direct or --tunnel."
   fi
-  warn "A public certificate isn't possible here (ports 80 and 443 busy, or the host is unreachable)."
-  warn "Using direct self-signed HTTPS instead: a stable address that works with Claude Code."
+  say "Using direct HTTPS instead (self-signed, stable address)"
   setup_direct || {
-    warn "Direct HTTPS failed too; trying a Cloudflare tunnel as a last resort."
+    warn "Direct HTTPS failed too; trying a Cloudflare tunnel."
     setup_tunnel || die "nothing worked. Free port 80 or 443, or pass --domain, then run this again."
   }
 fi
 
-say "Done."
+echo
+ui_box "$G" "FATLLM is ready"
 fatllm key
-mode_now="$(sed -n 's/^FATLLM_MODE=//p' "$CONF")"
 port_now="$(sed -n 's/^FATLLM_PORT=//p' "$CONF")"
-if { [ "$mode_now" = caddy ] || [ "$mode_now" = direct ]; } && [ "$port_now" != 443 ] && [ -n "$port_now" ]; then
-  echo "If Claude cannot connect, open TCP port $port_now in your cloud provider's firewall (Hetzner/Arvan/etc.)."
-fi
-if [ "$mode_now" = direct ]; then
-  echo "This is a self-signed certificate: Claude Code (srv) trusts it automatically."
-  echo "The claude.ai website connector needs a public certificate; for that use --domain or --tunnel."
+if [ -n "$port_now" ]; then
+  note "Can't connect? Open TCP port $port_now in your provider's firewall panel."
+  echo
 fi

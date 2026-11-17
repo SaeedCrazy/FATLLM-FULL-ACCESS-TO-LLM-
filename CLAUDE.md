@@ -41,12 +41,12 @@ to run `fatllm status` on the server and send the output.
 
 ## Reachability modes (and the Cloudflare 1033 / changing-address problem)
 Three ways the key's address is served, chosen at install and switchable with `fatllm mode <m>`:
-- `caddy`: Caddy gets a real Let's Encrypt cert for `<ip>.sslip.io` (or `--domain`) on 443 or a
-  free alt port. Needs port 80 or 443 free. Works with the claude.ai connector. Stable address.
+- `caddy`: Caddy gets a real Let's Encrypt cert for `<ip>.sslip.io` (or `--domain`) on the FATLLM
+  port. Needs port 80 free (or the port to be 443). Works with the claude.ai connector. Stable address.
 - `direct`: the agent serves HTTPS itself with a long-lived self-signed cert on a stable port
   (agent env `FATLLM_TLS_CERT`/`FATLLM_TLS_KEY`, binds `0.0.0.0`). No port 80/443 or Cloudflare
   needed; works from Iran. The key uses the bare server IP (`https://<ip>[:port]/fat_...`), not
-  `*.sslip.io`, because sslip.io is filtered in Iran; port 443 is tried first (least often blocked).
+  `*.sslip.io`, because sslip.io is filtered in Iran; default port 9001.
   Re-running keeps the certificate while it still covers the address, so pinned clients keep working. `srv` trusts it by pinning the cert on `srv key` (TOFU → `~/.fatllm-cert`,
   used as `--cacert`). The claude.ai website connector will NOT trust it (needs a public cert).
 - `tunnel`: Cloudflare quick tunnel. Last resort — the address changes on every restart (so a saved
@@ -54,6 +54,11 @@ Three ways the key's address is served, chosen at install and switchable with `f
 If a user reports error 1033 or an address that keeps changing, tell them to run `fatllm mode direct`
 on the server (stable, Claude-Code-friendly), or `fatllm mode caddy` / `--domain` if they need the
 claude.ai connector.
+
+## Port
+Default port 9001, else a random free one in 9002-9999 (`pick_port` in install.sh); never 80/443 on its
+own, so it never clashes with x-ui, nginx or Caddy. A re-run keeps the previous port. `--port N|random`
+or `fatllm port N|random` moves it (the key's address changes; the token stays).
 
 ## Files
 - `install.sh`: one-line installer; never asks anything (re-runs itself with sudo when not root).
@@ -71,6 +76,9 @@ claude.ai connector.
   `/admin/expire`, `/admin/rotate` (new token in memory + env file, old key dies at once),
   `/admin/off` (runs `fatllm off` after answering). Check it at 390px in both themes with
   Playwright before committing UI changes (no sideways scroll, no console errors).
+- `server/ui.sh`: the terminal look shared by install.sh and fatllm (logo, colours, ✓/!/✗ lines,
+  spinners, boxes). Colours only on a real terminal, ASCII fallback (`FATLLM_ASCII=1`), and nothing
+  wider than the screen: check new output at 46 columns (`script -qc "stty cols 46; ..."`).
 - `server/fatllm`: the owner's CLI on the server (key, rotate, off/on, status, log, expire, mode,
   relay, update, uninstall). `fatllm` with no arguments on a terminal opens a numbered menu.
 - `srv`: client. The agent serves it at `<key>/srv` with the key built in.
