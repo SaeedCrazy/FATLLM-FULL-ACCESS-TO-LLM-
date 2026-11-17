@@ -69,13 +69,15 @@ relay_usage() {
   note "server can't (e.g. Iranian sites from a foreign server)."
   echo
   ui_cmd "relay add" "--host IP [--user root] [--port 22] [--name iran]"
+  ui_cmd "relay reverse add" "[--name iran] — the OTHER server dials in"
   ui_cmd "relay list" "relays and whether each is up"
   ui_cmd "relay test NAME" "this IP vs the IP it exits from"
   ui_cmd "relay remove NAME" "remove a relay"
   echo
-  note "The root password is used once to install a key,"
-  note "never stored. Hidden prompt, or piped in:"
-  note "  echo 'PASS' | fatllm relay add --host IP --name iran"
+  note "add: this server reaches out to the other one (needs the"
+  note "other to accept inbound). Password used once, never stored."
+  note "reverse: the other server reaches out to THIS one — use it"
+  note "when the other server can't be reached from outside (Iran)."
   echo
 }
 
@@ -269,6 +271,32 @@ relay_pkgs() {
   command -v ssh >/dev/null 2>&1 || { warn "could not install the ssh client"; return 1; }
 }
 
+this_ip() {  # this server's public IP (for the other server to dial back to)
+  local ip u
+  ip="${FATLLM_HOST:-}"
+  if ! [[ "$ip" =~ ^[0-9.]+$ ]]; then
+    ip=""
+    for u in https://api.ipify.org https://ipv4.icanhazip.com https://checkip.amazonaws.com; do
+      ip="$(curl -4 -fsS --max-time 6 "$u" 2>/dev/null | tr -d ' \r\n' || true)"
+      [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && break || ip=""
+    done
+  fi
+  echo "$ip"
+}
+
+port_live() {  # prints "up" if something listens on 127.0.0.1:$1
+  python3 - "$1" <<'PY'
+import socket, sys
+s = socket.socket(); s.settimeout(0.6)
+try:
+    s.connect(("127.0.0.1", int(sys.argv[1]))); print("up")
+except OSError:
+    pass
+finally:
+    s.close()
+PY
+}
+
 free_socks_port() {
   python3 - "$RELAY_DIR" <<'PY'
 import glob, json, os, socket, sys
@@ -367,6 +395,8 @@ EOF
   echo
 }
 
+is_reverse() { local r; r="$(json_get "$1" reverse)"; [ "$r" = True ] || [ "$r" = true ]; }
+
 relay_list() {
   local f n s host any=0
   ui_head "RELAYS"
@@ -374,7 +404,10 @@ relay_list() {
   for f in "$RELAY_DIR"/*.json; do
     [ -e "$f" ] || continue
     any=1; n="$(json_get "$f" name)"; s="$(json_get "$f" socks_port)"; host="$(json_get "$f" host)"
-    if systemctl is-active --quiet "fatllm-relay-$n" 2>/dev/null; then ui_dot good "$n" "via $host · socks :$s"
+    if is_reverse "$f"; then
+      if [ "$(port_live "$s")" = up ]; then ui_dot good "$n" "reverse · socks :$s · up"
+      else ui_dot bad "$n" "reverse · the other server hasn't dialed in yet"; fi
+    elif systemctl is-active --quiet "fatllm-relay-$n" 2>/dev/null; then ui_dot good "$n" "via $host · socks :$s"
     else ui_dot bad "$n" "down · via $host"; fi
   done
   [ "$any" = 1 ] || note "No relays yet. Add one: fatllm relay add --host IP --name iran"
@@ -384,22 +417,115 @@ relay_list() {
 relay_test() {
   local n="$1" f="$RELAY_DIR/$1.json"
   [ -f "$f" ] || { warn "no such relay: $n"; return 1; }
-  local s here out_ip
+  local s here out_ip hint="systemctl status fatllm-relay-$n"
   s="$(json_get "$f" socks_port)"
+  is_reverse "$f" && hint="run the paste block on the other server (fatllm relay reverse add $n shows it again)"
   here="$(curl -fsS --max-time 15 https://api.ipify.org 2>/dev/null || echo '?')"
   out_ip="$(curl -fsS --max-time 25 --socks5-hostname "127.0.0.1:$s" https://api.ipify.org 2>/dev/null || true)"
   ui_kv "this IP" "$here"
   if [ -n "$out_ip" ]; then ui_kv "via $n" "$out_ip"; ok "Relay '$n' works"
-  else warn "Relay '$n' is not working yet (check: systemctl status fatllm-relay-$n)"; return 1; fi
+  else warn "Relay '$n' is not working yet ($hint)"; return 1; fi
 }
 
 relay_remove() {
-  local n="$1"
-  [ -f "$RELAY_DIR/$n.json" ] || { warn "no such relay: $n"; return 1; }
-  systemctl disable --now "fatllm-relay-$n" >/dev/null 2>&1 || true
-  rm -f "/etc/systemd/system/fatllm-relay-$n.service" "$RELAY_DIR/$n.json" "$RELAY_DIR/$n.key" "$RELAY_DIR/$n.key.pub"
-  systemctl daemon-reload
-  ok "Relay '$n' removed"
+  local n="$1"; local f="$RELAY_DIR/$n.json"
+  [ -f "$f" ] || { warn "no such relay: $n"; return 1; }
+  if is_reverse "$f"; then
+    if [ -f "${FATLLM_AUTHKEYS:-/root/.ssh/authorized_keys}" ]; then
+      grep -vF "fatllm-reverse-$n" "${FATLLM_AUTHKEYS:-/root/.ssh/authorized_keys}" > "$RELAY_DIR/.ak.tmp" 2>/dev/null || true
+      mv "$RELAY_DIR/.ak.tmp" "${FATLLM_AUTHKEYS:-/root/.ssh/authorized_keys}"; chmod 600 "${FATLLM_AUTHKEYS:-/root/.ssh/authorized_keys}"
+    fi
+    rm -f "$f" "$RELAY_DIR/$n-rev.key" "$RELAY_DIR/$n-rev.key.pub"
+    ok "Reverse relay '$n' removed here."
+    note "On the other server also run: systemctl disable --now fatllm-out-$n"
+  else
+    systemctl disable --now "fatllm-relay-$n" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/fatllm-relay-$n.service" "$f" "$RELAY_DIR/$n.key" "$RELAY_DIR/$n.key.pub"
+    systemctl daemon-reload
+    ok "Relay '$n' removed"
+  fi
+}
+
+# Reverse relay: the OTHER server (one that can't be reached from outside, e.g. in Iran)
+# dials OUT to this FATLLM host and gives it a SOCKS port that exits there. Set up on THIS host;
+# it prints a self-contained block to paste on the other server.
+relay_reverse_add() {
+  local name="iran" sshport=22 from=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) name="${2:-}"; shift 2 ;;
+      --ssh-port) sshport="${2:-}"; shift 2 ;;
+      --from) from="${2:-}"; shift 2 ;;
+      *) warn "relay reverse add: unknown option $1"; return 1 ;;
+    esac
+  done
+  [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || { warn "name may use letters, digits, - and _"; return 1; }
+  [[ "$sshport" =~ ^[0-9]+$ ]] || { warn "--ssh-port must be a number"; return 1; }
+  command -v ssh-keygen >/dev/null 2>&1 || relay_pkgs || return 1
+  mkdir -p "$RELAY_DIR"; chmod 700 "$RELAY_DIR"
+
+  local myip; myip="$(this_ip)"
+  [ -n "$myip" ] || warn "could not detect this server's public IP; put it into the block by hand"
+
+  local key="$RELAY_DIR/$name-rev.key"
+  if [ ! -f "$key" ]; then ssh-keygen -t ed25519 -N '' -C "fatllm-reverse-$name" -f "$key" -q; fi
+  chmod 600 "$key"
+  local socks; socks="$(free_socks_port)"
+  [ -n "$socks" ] || { warn "no free local port"; return 1; }
+
+  # Restricted authorized_keys entry: this key may ONLY open port forwards, never get a shell.
+  local ak="${FATLLM_AUTHKEYS:-/root/.ssh/authorized_keys}"
+  mkdir -p "$(dirname "$ak")"; chmod 700 "$(dirname "$ak")"
+  touch "$ak"; chmod 600 "$ak"
+  local opts="restrict,port-forwarding"
+  [ -n "$from" ] && opts="$opts,from=\"$from\""
+  grep -vF "fatllm-reverse-$name" "$ak" > "$RELAY_DIR/.ak.tmp" 2>/dev/null || true
+  mv "$RELAY_DIR/.ak.tmp" "$ak"
+  printf '%s %s\n' "$opts" "$(cat "$key.pub")" >> "$ak"
+  chmod 600 "$ak"
+
+  umask 077
+  cat > "$RELAY_DIR/$name.json" <<EOF
+{"name":"$name","host":"${from:-reverse}","user":"root","port":$sshport,"socks_port":$socks,"reverse":true,"note":"reverse SOCKS 127.0.0.1:$socks (dialed in from the other server)"}
+EOF
+  umask 022
+
+  local priv; priv="$(cat "$key")"
+  ui_head "REVERSE RELAY '$name'" "runs through this server ($myip)"
+  note "Paste this WHOLE block on your OTHER server as root"
+  note "(the one that can't be reached from outside, e.g. in Iran):"
+  echo
+  cat <<PASTE
+# ===== FATLLM reverse relay '$name' -> $myip =====
+install -d -m 700 /etc/fatllm
+cat > /etc/fatllm/$name-rev.key <<'FATLLMKEY'
+$priv
+FATLLMKEY
+chmod 600 /etc/fatllm/$name-rev.key
+command -v ssh >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq openssh-client; } 2>/dev/null || yum install -y -q openssh-clients 2>/dev/null || apk add -q openssh-client 2>/dev/null || true
+cat > /etc/systemd/system/fatllm-out-$name.service <<'FATLLMUNIT'
+[Unit]
+Description=FATLLM reverse relay to $myip
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/bin/env ssh -NT -R 127.0.0.1:$socks -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/etc/fatllm/$name-known_hosts -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=20 -i /etc/fatllm/$name-rev.key -p $sshport root@$myip
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+FATLLMUNIT
+systemctl daemon-reload && systemctl enable --now fatllm-out-$name
+sleep 3 && systemctl is-active --quiet fatllm-out-$name && echo "OK: reverse relay '$name' is up" || { echo "FAILED:"; journalctl -u fatllm-out-$name -n 12 --no-pager; }
+# ===== end =====
+PASTE
+  echo
+  note "After pasting it there, come back here and run:  fatllm relay test $name"
+  note "Then your AI uses it:  srv --via $name 'curl -s https://mixin.ir'"
+  echo
 }
 
 # ------------------------------------------------------------------ interactive menu
@@ -476,12 +602,15 @@ menu() {
          fi
          pause ;;
       9) sub relay list
-         printf '  %s1%s  add a server   %s2%s  test   %s3%s  remove   %s0%s  back\n' "$Y" "$R" "$Y" "$R" "$Y" "$R" "$Y" "$R"
+         printf '  %s1%s  add (this reaches the other)\n' "$Y" "$R"
+         printf '  %s2%s  reverse (other reaches here — Iran)\n' "$Y" "$R"
+         printf '  %s3%s  test    %s4%s  remove    %s0%s  back\n' "$Y" "$R" "$Y" "$R" "$Y" "$R"
          case "$(ask "  Choose: ")" in
            1) h="$(ask "  Other server IP: ")"; u="$(ask "  User [root]: ")"; n="$(ask "  Short name (e.g. iran): ")"
               [ -n "$h" ] && sub relay add --host "$h" --user "${u:-root}" ${n:+--name "$n"} ;;
-           2) n="$(ask "  Relay name: ")"; [ -n "$n" ] && sub relay test "$n" ;;
-           3) n="$(ask "  Relay name: ")"; [ -n "$n" ] && yes_no "Remove relay $n?" && sub relay remove "$n" ;;
+           2) n="$(ask "  Short name [iran]: ")"; sub relay reverse add ${n:+--name "$n"} ;;
+           3) n="$(ask "  Relay name: ")"; [ -n "$n" ] && sub relay test "$n" ;;
+           4) n="$(ask "  Relay name: ")"; [ -n "$n" ] && yes_no "Remove relay $n?" && sub relay remove "$n" ;;
          esac
          pause ;;
       10) echo
@@ -557,11 +686,17 @@ case "$cmd" in
       *) run_installer --port "$p" ;;
     esac ;;
   relay)
-    need_root
+    need_root; load
     mkdir -p "$RELAY_DIR"; chmod 700 "$RELAY_DIR"
     action="${1:-list}"; [ $# -gt 0 ] && shift
     case "$action" in
       add) relay_add "$@" ;;
+      reverse | rev)
+        sub2="${1:-add}"; [ $# -gt 0 ] && shift
+        case "$sub2" in
+          add | "") relay_reverse_add "$@" ;;
+          *) warn "usage: fatllm relay reverse add [--name iran] [--ssh-port 22] [--from IP]" ;;
+        esac ;;
       list | ls) relay_list ;;
       test) [ -n "${1:-}" ] || die "usage: fatllm relay test <name>"; relay_test "$1" ;;
       remove | rm | del) [ -n "${1:-}" ] || die "usage: fatllm relay remove <name>"; relay_remove "$1" ;;

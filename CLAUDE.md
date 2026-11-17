@@ -29,9 +29,15 @@ blocked from the FATLLM server itself:
 - Iranian sites (Mixin, Iranian gateways) block foreign IPs → use the relay that exits in Iran.
 - Sites blocked from inside Iran (Telegram, AI, GitHub) → run WITHOUT `via` if FATLLM is on a
   foreign server, or `via` the foreign relay if FATLLM is on the Iranian server.
-The owner adds relays with `fatllm relay add --host <ip> --user root --name <name>` on the server
-(it installs an SSH key, used once; the password is never stored). Only the owner does this — do
-not ask for another server's root password in chat; point them to that command.
+Two ways to connect another server, both set up on the FATLLM host:
+- `fatllm relay add --host <ip> --user root --name <name>`: this host dials OUT to the other server
+  (needs the other to accept inbound SSH). Installs an SSH key with a one-time password, never stored.
+- `fatllm relay reverse add --name <name>`: the OTHER server dials IN to this host. Use this when the
+  other server can't be reached from outside (an Iranian server blocks inbound, so forward `add`, the
+  panel and tunnels all fail). It prints a self-contained block the owner pastes on the other server;
+  that opens a reverse SOCKS back here. The authorized_keys entry it adds is `restrict,port-forwarding`
+  (tunnel only, no shell). Either way `via=<name>` then works the same.
+Only the owner runs these — do not ask for another server's root password in chat; point them to the command.
 
 If the key is in the environment as `FATLLM_KEY`, srv uses it; no paste is needed.
 If srv cannot reach the server: a 403 from the proxy means the cloud environment's network

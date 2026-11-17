@@ -437,6 +437,47 @@ class RotateTest(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class ReverseRelayTest(unittest.TestCase):
+    """`fatllm relay reverse add` wiring (no live SSH): restricted key, json, and the paste block."""
+
+    def test_reverse_relay_setup(self):
+        if os.geteuid() != 0 or not shutil.which("ssh-keygen"):
+            self.skipTest("needs root and ssh-keygen")
+        tmp = tempfile.mkdtemp()
+        conf = os.path.join(tmp, "fatllm.env")
+        with open(conf, "w") as f:
+            f.write("FATLLM_TOKEN=%s\nFATLLM_MODE=direct\nFATLLM_HOST=203.0.113.10\nFATLLM_PORT=9001\n"
+                    "FATLLM_PUBLIC_URL=https://203.0.113.10:9001\nFATLLM_EXPIRES=0\n" % TOKEN)
+        ak = os.path.join(tmp, "authorized_keys")
+        env = dict(os.environ, FATLLM_CONF=conf, FATLLM_RELAY_DIR=os.path.join(tmp, "relays"),
+                   FATLLM_AUTHKEYS=ak, FATLLM_AUDIT_LOG=os.path.join(tmp, "a.log"), TERM="dumb")
+        fatllm = os.path.join(ROOT, "server", "fatllm")
+        try:
+            p = subprocess.run(["bash", fatllm, "relay", "reverse", "add", "--name", "iran", "--from", "37.32.6.236"],
+                               env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+            self.assertEqual(p.returncode, 0, p.stdout)
+            out = p.stdout.decode()
+            # restricted key: forwarding only, never a shell
+            with open(ak) as f:
+                line = f.read().strip()
+            self.assertTrue(line.startswith('restrict,port-forwarding,from="37.32.6.236" ssh-ed25519 '))
+            self.assertTrue(line.endswith("fatllm-reverse-iran"))
+            with open(os.path.join(tmp, "relays", "iran.json")) as f:
+                j = json.load(f)
+            self.assertTrue(j["reverse"])
+            self.assertEqual(j["user"], "root")
+            # the paste block for the other server is valid bash and dials back with a reverse SOCKS
+            block = out[out.index("# ===== FATLLM reverse"):out.index("# ===== end") + 10]
+            chk = subprocess.run(["bash", "-n"], input=block.encode(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            self.assertEqual(chk.returncode, 0, chk.stdout)
+            self.assertIn("-R 127.0.0.1:%d" % j["socks_port"], block)
+            self.assertIn("root@203.0.113.10", block)   # the configured host, dialed from the other side
+            self.assertIn("-----BEGIN OPENSSH PRIVATE KEY-----", block)
+            self.assertNotIn(TOKEN, out)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class DirectTLSTest(unittest.TestCase):
     """The agent serving HTTPS itself with a self-signed cert, and srv pinning it (direct mode)."""
 
