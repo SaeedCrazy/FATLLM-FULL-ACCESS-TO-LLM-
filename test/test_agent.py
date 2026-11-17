@@ -497,6 +497,22 @@ class DirectTLSTest(unittest.TestCase):
         finally:
             shutil.rmtree(home, ignore_errors=True)
 
+    def test_srv_pins_selfsigned_on_bare_ip(self):
+        # direct mode keys use the server's IP (no DNS name needed): https://<ip>:<port>/fat_...
+        home = tempfile.mkdtemp()
+        try:
+            env = dict(os.environ, HOME=home, NO_PROXY="*", no_proxy="*", FATLLM_KEY="")
+            srv = os.path.join(ROOT, "srv")
+            ip_key = "https://127.0.0.1:%d/%s" % (self.port, TOKEN)
+            p = subprocess.run([srv, "key", "FATLLM key: " + ip_key], env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+            self.assertEqual(p.returncode, 0, p.stdout)
+            self.assertIn(b"pinned", p.stdout)
+            p = subprocess.run([srv, "echo ip-ok"], env=env, stdout=subprocess.PIPE, timeout=60)
+            self.assertIn(b"ip-ok", p.stdout)
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

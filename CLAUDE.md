@@ -45,7 +45,9 @@ Three ways the key's address is served, chosen at install and switchable with `f
   free alt port. Needs port 80 or 443 free. Works with the claude.ai connector. Stable address.
 - `direct`: the agent serves HTTPS itself with a long-lived self-signed cert on a stable port
   (agent env `FATLLM_TLS_CERT`/`FATLLM_TLS_KEY`, binds `0.0.0.0`). No port 80/443 or Cloudflare
-  needed; works from Iran. `srv` trusts it by pinning the cert on `srv key` (TOFU → `~/.fatllm-cert`,
+  needed; works from Iran. The key uses the bare server IP (`https://<ip>[:port]/fat_...`), not
+  `*.sslip.io`, because sslip.io is filtered in Iran; port 443 is tried first (least often blocked).
+  Re-running keeps the certificate while it still covers the address, so pinned clients keep working. `srv` trusts it by pinning the cert on `srv key` (TOFU → `~/.fatllm-cert`,
   used as `--cacert`). The claude.ai website connector will NOT trust it (needs a public cert).
 - `tunnel`: Cloudflare quick tunnel. Last resort — the address changes on every restart (so a saved
   key goes stale) and can show Cloudflare error 1033 when the tunnel drops.

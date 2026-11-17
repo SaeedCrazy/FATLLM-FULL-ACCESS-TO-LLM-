@@ -378,25 +378,42 @@ EOF
 }
 
 setup_direct() {  # 0 = the agent serves HTTPS itself with a self-signed cert on a stable port
-  local ip host pub url crt key san cfg
+  local ip host pub url crt key san cfg want p
   ip="$(public_ip || true)"
+  # The key uses the bare IP unless the owner has a real domain: a self-signed certificate gains
+  # nothing from a DNS name, and *.sslip.io is filtered in some countries (Iran), which made the
+  # panel unreachable from phones there.
   if [ -n "$DOMAIN" ]; then host="$DOMAIN"
-  elif [ -n "$OLD_HOST" ] && [ "$OLD_MODE" = direct ]; then host="$OLD_HOST"
-  elif [ -n "$ip" ] && ! is_private "$ip"; then host="${ip//./-}.sslip.io"
+  elif [ -n "$OLD_HOST" ] && [ "$OLD_MODE" = direct ] && [ "${OLD_HOST%.sslip.io}" = "$OLD_HOST" ] \
+      && ! [[ "$OLD_HOST" =~ ^[0-9.]+$ ]]; then host="$OLD_HOST"
+  elif [ -n "$ip" ] && ! is_private "$ip"; then host="$ip"
   else warn "could not find this server's public IPv4"; return 1; fi
   command -v openssl >/dev/null 2>&1 || pkg_install openssl || { warn "openssl is needed for a self-signed certificate"; return 1; }
 
-  if [ -n "$PORT" ]; then pub="$PORT"; port_free "$pub" || { warn "port $pub is already in use"; return 1; }
-  elif [ -n "$OLD_PORT" ] && [ "$OLD_MODE" = direct ] && port_free "$OLD_PORT"; then pub="$OLD_PORT"
-  else pub=""; for p in 8443 2053 2083 2087 2096 9443 443; do port_free "$p" && { pub="$p"; break; }; done; fi
+  # Port 443 first: it is the one datacenter firewalls and national filters almost never block.
+  pub=""
+  if [ -n "$PORT" ]; then
+    if port_free "$PORT"; then pub="$PORT"; else warn "port $PORT is already in use; choosing another"; fi
+  fi
+  if [ -z "$pub" ]; then
+    for p in 443 "$OLD_PORT" 2053 2083 2087 2096 8443 9443; do
+      [ -n "$p" ] && port_free "$p" && { pub="$p"; break; }
+    done
+  fi
   [ -n "$pub" ] || { warn "no free HTTPS port"; return 1; }
 
-  say "Making a self-signed certificate for $host"
   mkdir -p "$STATE/tls"; chmod 700 "$STATE/tls"
   crt="$STATE/tls/cert.pem"; key="$STATE/tls/key.pem"
-  san="DNS:$host"; [ -n "$ip" ] && san="$san,IP:$ip"
-  cfg="$TMP/openssl.cnf"
-  cat > "$cfg" <<CFG
+  if [[ "$host" =~ ^[0-9.]+$ ]]; then san="IP:$host"; want="IP Address:$host"
+  else san="DNS:$host"; [ -n "$ip" ] && san="$san,IP:$ip"; want="DNS:$host"; fi
+  # Keep a certificate that still covers the address, so clients that pinned it keep working.
+  if [ -s "$crt" ] && [ -s "$key" ] && openssl x509 -in "$crt" -noout -checkend 2592000 >/dev/null 2>&1 \
+      && openssl x509 -in "$crt" -noout -text 2>/dev/null | grep -qF "$want"; then
+    say "Keeping the existing certificate for $host"
+  else
+    say "Making a self-signed certificate for $host"
+    cfg="$TMP/openssl.cnf"
+    cat > "$cfg" <<CFG
 [req]
 distinguished_name = dn
 x509_extensions = v3
@@ -406,8 +423,9 @@ CN = $host
 [v3]
 subjectAltName = $san
 CFG
-  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$key" -out "$crt" -days 3650 -config "$cfg" >/dev/null 2>&1 \
-    || { warn "openssl could not make a certificate"; return 1; }
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$key" -out "$crt" -days 3650 -config "$cfg" >/dev/null 2>&1 \
+      || { warn "openssl could not make a certificate"; return 1; }
+  fi
   chmod 600 "$key" "$crt"
 
   url="https://$host"; [ "$pub" = 443 ] || url="$url:$pub"
