@@ -1,25 +1,24 @@
 #!/usr/bin/env bash
 # fatllm: manage FATLLM (full server access for AI agents) on this server.
+# On the hub: keys, connected servers, port, certificate. On a connected server: its link to the hub.
 # Output is English on purpose: phone SSH apps show Persian badly.
 set -euo pipefail
 
 CONF="${FATLLM_CONF:-/etc/fatllm/fatllm.env}"
-STATE=/var/lib/fatllm
-LOG="${FATLLM_AUDIT_LOG:-/var/log/fatllm/audit.log}"
-RELAY_DIR="${FATLLM_RELAY_DIR:-/etc/fatllm/relays}"
+APP="${FATLLM_APP:-/opt/fatllm}"
 RAW="${FATLLM_RAW:-https://raw.githubusercontent.com/SaeedCrazy/FATLLM-FULL-ACCESS-TO-LLM-/HEAD}"
-UNITS="fatllm fatllm-caddy fatllm-tunnel"
 SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+PY="$(command -v python3 || echo python3)"
 
 # ------------------------------------------------------------------ look (server/ui.sh)
 UI_FILE=""
-for f in /opt/fatllm/ui.sh "$(dirname "$SELF")/ui.sh"; do [ -f "$f" ] && { UI_FILE="$f"; break; }; done
+for f in "$APP/ui.sh" "$(dirname "$SELF")/ui.sh"; do [ -f "$f" ] && { UI_FILE="$f"; break; }; done
 if [ -n "$UI_FILE" ]; then
   # shellcheck source=server/ui.sh
   . "$UI_FILE"
   ui_init
-else  # plain fallback, e.g. an old install without ui.sh
-  R="" B="" D="" G="" C="" Y="" RD="" M="" UI_COLS=80 UI_W=60 S_ELL="..." S_NL=" / "
+else  # plain fallback
+  R="" B="" D="" G="" C="" Y="" RD="" M="" A="" UI_COLS=80 UI_W=60 UI_TTY=0 S_ELL="..." S_DOT="*"
   say() { printf '> %s\n' "$*"; }
   ok() { printf '+ %s\n' "$*"; }
   note() { printf '  %s\n' "$*"; }
@@ -29,503 +28,314 @@ else  # plain fallback, e.g. an old install without ui.sh
   ui_rule() { printf '  ----------------------------------------\n'; }
   ui_head() { printf '\n  %s  %s\n' "$1" "${2:-}"; }
   ui_kv() { printf '  %-9s %s\n' "$1" "$2"; }
-  ui_cmd() { printf '  %-17s %s\n' "$1" "$2"; }
+  ui_cmd() { printf '  %-19s %s\n' "$1" "$2"; }
   ui_dot() { local m="*"; [ "$1" = bad ] && m="x"; [ "$1" = off ] && m="o"; printf '  %s %-10s %s\n' "$m" "$2" "$3"; }
   ui_box() { printf '  %s\n' "$2"; }
   ui_wait() { sleep "$2"; }
+  ui_spin() { :; }
   ui_spin_end() { :; }
 fi
 
-# ------------------------------------------------------------------ help
-usage() {
-  ui_logo
-  ui_head "EVERYDAY"
-  ui_cmd "fatllm" "menu with every option"
-  ui_cmd "fatllm key" "key + web panel link"
-  ui_cmd "fatllm status" "running? reachable?"
-  ui_cmd "fatllm log [N]" "what the AI did"
-  ui_head "SECURITY"
-  ui_cmd "fatllm rotate" "new key, old one dies"
-  ui_cmd "fatllm expire T" "30m | 12h | 7d | never"
-  ui_cmd "fatllm off / on" "turn access off / on"
-  ui_head "NETWORK"
-  ui_cmd "fatllm port N" "move to port N / random"
-  ui_cmd "fatllm mode M" "caddy | direct | tunnel"
-  ui_cmd "fatllm relay" "chain another server"
-  ui_head "MAINTENANCE"
-  ui_cmd "fatllm test" "check the key works"
-  ui_cmd "fatllm update" "update, keep the key"
-  ui_cmd "fatllm uninstall" "remove everything"
-  echo
-  note "caddy  = real certificate (needs port 80 free)"
-  note "direct = self-signed, stable address (Claude Code)"
-  note "tunnel = Cloudflare, address changes on restart"
-  echo
-}
-
-relay_usage() {
-  ui_head "RELAY" "chain another server"
-  note "Claude runs commands 'via' it to reach sites this"
-  note "server can't (e.g. Iranian sites from a foreign server)."
-  echo
-  ui_cmd "relay add" "--host IP [--user root] [--port 22] [--name iran]"
-  ui_cmd "relay reverse add" "[--name iran] — the OTHER server dials in"
-  ui_cmd "relay list" "relays and whether each is up"
-  ui_cmd "relay test NAME" "this IP vs the IP it exits from"
-  ui_cmd "relay remove NAME" "remove a relay"
-  echo
-  note "add: this server reaches out to the other one (needs the"
-  note "other to accept inbound). Password used once, never stored."
-  note "reverse: the other server reaches out to THIS one — use it"
-  note "when the other server can't be reached from outside (Iran)."
-  echo
-}
-
 # ------------------------------------------------------------------ helpers
-need_root() { [ "$(id -u)" = 0 ] || die "Run as root: sudo fatllm"; }
+need_root() { [ "$(id -u)" = 0 ] || die "run as root: sudo fatllm $*"; }
 # shellcheck disable=SC1090
-load() { [ -f "$CONF" ] || die "FATLLM is not installed."; set -a; . "$CONF"; set +a; }
-
-set_conf() {
-  local key="$1" val="$2"
-  if grep -q "^$key=" "$CONF"; then sed -i "s|^$key=.*|$key=$val|" "$CONF"; else echo "$key=$val" >> "$CONF"; fi
-}
-
-new_token() { python3 -c 'import secrets; print("fat_" + secrets.token_urlsafe(32))'; }
-json_get() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],""))' "$1" "$2" 2>/dev/null; }
-fmt_time() { date -d "@$1" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$1"; }
-
-units_for_mode() {
-  case "${FATLLM_MODE:-caddy}" in
-    tunnel) echo "fatllm fatllm-tunnel" ;;
-    direct) echo "fatllm" ;;
-    *) echo "fatllm fatllm-caddy" ;;
-  esac
-}
-
-unit_label() { case "$1" in fatllm) echo agent ;; fatllm-caddy) echo https ;; fatllm-tunnel) echo tunnel ;; *) echo "$1" ;; esac; }
-
-mode_label() {
-  case "${FATLLM_MODE:-caddy}" in
-    caddy) echo "caddy · real certificate" ;;
-    direct) echo "direct · self-signed" ;;
-    tunnel) echo "tunnel · Cloudflare" ;;
-    *) echo "${FATLLM_MODE:-?}" ;;
-  esac
-}
-
-expires_label() { if [ "${FATLLM_EXPIRES:-0}" != 0 ]; then fmt_time "$FATLLM_EXPIRES"; else echo never; fi; }
-
-relay_units() {
-  local f out=""
-  for f in "$RELAY_DIR"/*.json; do
-    [ -e "$f" ] || continue
-    out="$out fatllm-relay-$(basename "$f" .json)"
-  done
-  echo "$out"
-}
-
-tunnel_url() { grep -aoE 'https://[a-z0-9]+(-[a-z0-9]+)+\.trycloudflare\.com' "$STATE/tunnel.log" 2>/dev/null | tail -1 || true; }
-
-# Public address without the token (waits a little for a fresh tunnel).
-public_base() {
-  if [ "${FATLLM_MODE:-caddy}" = tunnel ]; then
-    local u=""
-    for _ in $(seq 1 30); do u="$(tunnel_url)"; [ -n "$u" ] && break; ui_wait "Waiting for the tunnel address" 1; done
+load() { [ -f "$CONF" ] || die "FATLLM is not installed here."; set -a; . "$CONF"; set +a; }
+is_node() { [ "${FATLLM_ROLE:-hub}" = node ]; }
+adm() {  # agent.py admin ... (settings come from the sourced env file); its errors as a red line
+  local err rc=0 msg
+  err="$(mktemp)"
+  "$PY" "$APP/agent.py" admin "$@" 2>"$err" || rc=$?
+  if [ "$rc" != 0 ]; then
+    msg="$(tail -n 2 "$err" | tr '\n' ' ')"
     ui_spin_end
-    [ -n "$u" ] || return 1
-    echo "$u"
-  else
-    echo "$FATLLM_PUBLIC_URL"
+    printf '%s\n' "${msg:-failed}" | fold -s -w $(( ${UI_COLS:-80} - 6 )) | sed "1s/^/  ${RD}${S_BAD:-x}${R} /; 2,\$s/^/    /" >&2
   fi
+  rm -f "$err"
+  return "$rc"
 }
-
-check() {
-  local base="$1" url mode="${FATLLM_MODE:-caddy}"
-  url="$base/$FATLLM_TOKEN/info"
-  if [ "$mode" = direct ]; then
-    curl -fsS --insecure --noproxy '*' --max-time 10 "https://127.0.0.1:${FATLLM_PORT:-443}/$FATLLM_TOKEN/info" >/dev/null 2>&1
-  elif [ "$mode" = caddy ]; then
-    local hp="${base#https://}" host port
-    host="${hp%%:*}"; port=443
-    [ "$hp" != "$host" ] && port="${hp##*:}"
-    curl -fsS --noproxy '*' --max-time 10 --resolve "$host:$port:127.0.0.1" "$url" >/dev/null 2>&1
-  else
-    curl -fsS --max-time 15 "$url" >/dev/null 2>&1
-  fi
+api() { adm api "$@"; }                             # this server's agent (root-only token)
+jq_py() {  # jq_py 'python code using d and sys.argv[1:]' [args] < json
+  local code="$1"; shift
+  "$PY" -c "import json, sys, time
+d = json.load(sys.stdin)
+$code" "$@"
 }
+fmt_time() { date -d "@$1" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$1"; }
+ago() {  # seconds -> 3m / 2h / 5d
+  local s="$1"
+  if [ "$s" -lt 120 ]; then echo "${s}s"; elif [ "$s" -lt 7200 ]; then echo "$(( s / 60 ))m"
+  elif [ "$s" -lt 172800 ]; then echo "$(( s / 3600 ))h"; else echo "$(( s / 86400 ))d"; fi
+}
+agent_up() { systemctl is-active --quiet fatllm 2>/dev/null; }
+mode_label() { if [ "${FATLLM_MODE:-direct}" = cert ]; then echo "public certificate"; else echo "self-signed"; fi; }
+units() { if [ "${FATLLM_MODE:-direct}" = cert ]; then echo "fatllm fatllm-caddy"; else echo fatllm; fi; }
+US=$'\037'
+valid_name() { [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$ ]]; }
 
-restart_agent() { systemctl restart fatllm; sleep 1; }
-
-run_installer() {  # run the latest install.sh with the given options (keeps the key)
+run_installer() {  # the latest install.sh with these options (keeps keys, port and servers)
   local tmp; tmp="$(mktemp -d)"
-  curl -fsSL --retry 3 "$RAW/install.sh" -o "$tmp/install.sh" || { rm -rf "$tmp"; die "download failed: $RAW/install.sh"; }
+  if [ -n "${FATLLM_LOCAL_SRC:-}" ]; then cp "$FATLLM_LOCAL_SRC/install.sh" "$tmp/install.sh"; set -- --local "$@"
+  else curl -fsSL --retry 3 "$RAW/install.sh" -o "$tmp/install.sh" || { rm -rf "$tmp"; die "download failed: $RAW/install.sh"; }; fi
   bash "$tmp/install.sh" "$@" || { rm -rf "$tmp"; exit 1; }
   rm -rf "$tmp"
 }
 
-# ------------------------------------------------------------------ key / status / log
-show_key() {
-  local base key
-  base="$(public_base)" || { warn "The tunnel has no address yet. Try again in a minute: fatllm key"; return 1; }
-  key="$base/$FATLLM_TOKEN"
-  ui_head "KEY" "copy the whole line, give it to your AI"
-  printf '  %s%sFATLLM key: %s%s\n' "$G" "$B" "$key" "$R"
+# expiry of one key, as words
+key_expiry() {  # name -> "never" / "2026-11-20 10:00" / "EXPIRED"
+  adm keys | jq_py '
+for k in d:
+    if k["name"] == sys.argv[1]:
+        e = k.get("expires") or 0
+        print("never" if not e else ("EXPIRED" if e < time.time() else time.strftime("%Y-%m-%d %H:%M", time.localtime(e))))' "$1" 2>/dev/null \
+    || echo "?"
+}
+
+# servers, one per line: name US state US detail (US = the unit separator: fields may be empty)
+servers_tsv() {
+  api GET '/servers?json=1' | jq_py '
+for s in d["servers"]:
+    if s.get("self"):
+        st, det = "hub", s.get("os") or ""
+    elif s.get("online"):
+        st, det = "online", s.get("os") or ""
+        if s.get("version") and s.get("version") != d["servers"][0].get("version"):
+            det = "old version %s, run: fatllm update" % s["version"]
+    elif s.get("joining"):
+        st, det = "joining", "waiting for the join line"
+    else:
+        st, det = "offline", "never connected"
+        if s.get("last_seen"):
+            x = int(time.time() - s["last_seen"])
+            det = "last seen %s ago" % ("%dm" % (x // 60) if x < 7200 else "%dh" % (x // 3600) if x < 172800 else "%dd" % (x // 86400))
+    print("\x1f".join((s["name"], st, det)))'
+}
+
+print_servers() {
+  local name st det out
+  if ! out="$(servers_tsv 2>/dev/null)"; then warn "The agent is not running (fatllm on)."; return 1; fi
+  while IFS=$US read -r name st det; do
+    case "$st" in
+      hub) ui_dot good "$name" "hub $S_DOT_SEP $det" ;;
+      online) ui_dot good "$name" "online $S_DOT_SEP $det" ;;
+      joining) ui_dot warn "$name" "$det" ;;
+      *) ui_dot bad "$name" "offline $S_DOT_SEP $det" ;;
+    esac
+  done <<<"$out"
+}
+S_DOT_SEP="·"; [ "${UI_U:-1}" = 1 ] || S_DOT_SEP="-"
+
+# ------------------------------------------------------------------ hub: key / status / log
+show_key() {  # [key name]
+  local name="${1:-}" url exp
+  url="$(adm show ${name:+"$name"})" || exit 1
+  exp="$(key_expiry "${name:-main}")"
+  ui_head "KEY" "${name:+"$name · "}give the whole line to your AI"
+  printf '  %s%sFATLLM key: %s%s\n' "$G" "$B" "$url" "$R"
   ui_head "PANEL" "open it in your phone's browser"
-  printf '  %s%s/panel%s\n' "$C" "$key" "$R"
-  if [ "${FATLLM_MODE:-caddy}" != direct ]; then
+  printf '  %s%s/panel%s\n' "$C" "$url" "$R"
+  if [ "${FATLLM_MODE:-direct}" = cert ]; then
     ui_head "MCP" "claude.ai / ChatGPT connector"
-    printf '  %s/mcp\n' "$key"
+    printf '  %s/mcp\n' "$url"
   fi
   echo
   ui_rule
-  ui_kv "mode" "$(mode_label)"
-  ui_kv "expires" "$(expires_label)"
-  ui_kv "secret" "full root access, keep it private"
+  ui_kv "expires" "$exp"
+  ui_kv "gives" "root on all connected servers"
+  ui_kv "keep" "it secret, like a password"
   ui_rule
-  case "${FATLLM_MODE:-caddy}" in
-    tunnel)
-      note "Tunnel: the address changes after a restart."
-      note "For a stable one: fatllm mode direct" ;;
-    direct)
-      note "Self-signed: the browser warns once for the panel"
-      note "(Advanced > Proceed). Claude Code trusts it itself."
-      note "Web connectors need: fatllm mode caddy" ;;
-  esac
+  if [ "${FATLLM_MODE:-direct}" != cert ]; then
+    note "Self-signed certificate: the browser warns"
+    note "once (Advanced > Proceed). That's normal."
+  fi
+  [ "$exp" = EXPIRED ] && warn "This key has expired: fatllm expire never"
   echo
 }
 
 last_action() {
   local line
-  line="$(grep -a ' run ' "$LOG" 2>/dev/null | tail -n 1 || true)"
+  line="$(adm log 400 2>/dev/null | awk -F'\037' '$3=="run"' | tail -n 1 || true)"
   [ -n "$line" ] || { echo none; return; }
-  printf '%s %s' "$(printf '%s' "${line%% *}" | cut -c6-16 | tr 'T' ' ')" \
-    "$(printf '%s' "$line" | sed -E 's/^[^ ]+ [^ ]+ run job=[0-9a-f]+ cwd=[^ ]+( via=[^ ]+)? cmd=//' | cut -c1-$(( UI_W - 26 )))"
+  IFS=$US read -r d t _ on det <<<"$line"
+  det="$d $t [$on] $det"
+  [ "${#det}" -gt $(( UI_W - 14 )) ] && det="${det:0:$(( UI_W - 15 ))}${S_ELL:-...}"
+  echo "$det"
 }
 
 show_status() {
-  local base u ok_all=1 f n host
-  ui_head "STATUS" "$(hostname 2>/dev/null || echo server)"
+  local bad=0 u n_keys
+  ui_head "STATUS" "hub \"${FATLLM_NAME:-main}\" $S_DOT_SEP $(hostname 2>/dev/null || echo server)"
   echo
-  for u in $(units_for_mode); do
-    if systemctl is-active --quiet "$u" 2>/dev/null; then ui_dot good "$(unit_label "$u")" "running"
-    else ui_dot bad "$(unit_label "$u")" "$(systemctl is-active "$u" 2>/dev/null || echo stopped)"; ok_all=0; fi
+  for u in $(units); do
+    local label=agent; [ "$u" = fatllm-caddy ] && label=https
+    if systemctl is-active --quiet "$u" 2>/dev/null; then ui_dot good "$label" "running"
+    else ui_dot bad "$label" "$(systemctl is-active "$u" 2>/dev/null || echo stopped)"; bad=1; fi
   done
-  base="$(public_base 2>/dev/null || true)"
-  if [ -n "$base" ] && check "$base"; then ui_dot good "self-test" "the key works"
-  else ui_dot bad "self-test" "failed"; ok_all=0; fi
-  for f in "$RELAY_DIR"/*.json; do
-    [ -e "$f" ] || continue
-    n="$(json_get "$f" name)"; host="$(json_get "$f" host)"
-    if systemctl is-active --quiet "fatllm-relay-$n" 2>/dev/null; then ui_dot good "relay" "$n via $host"
-    else ui_dot bad "relay" "$n down"; fi
-  done
+  if api GET /info >/dev/null 2>&1; then ui_dot good "self-test" "answers on port ${FATLLM_PORT:-?}"
+  else ui_dot bad "self-test" "no answer"; bad=1; fi
+  ui_head "SERVERS"
+  print_servers || true
   echo
   ui_rule
-  ui_kv "address" "${base:-no tunnel address yet}"
-  ui_kv "mode" "$(mode_label)"
-  ui_kv "expires" "$(expires_label)"
+  n_keys="$(adm keys | jq_py 'print(len(d))' 2>/dev/null || echo '?')"
+  ui_kv "address" "${FATLLM_PUBLIC_URL:-?}"
+  ui_kv "cert" "$(mode_label)"
+  ui_kv "keys" "$n_keys $S_DOT_SEP main: $(key_expiry main)"
   ui_kv "last" "$(last_action)"
   ui_rule
-  [ "$ok_all" = 1 ] || note "details: journalctl -u fatllm -u fatllm-caddy -n 50"
+  note "Not reachable? Open TCP port ${FATLLM_PORT:-?} in"
+  note "your provider's firewall panel."
+  [ "$bad" = 0 ] || note "details: journalctl -u fatllm -n 50"
   echo
 }
 
-show_log() {
-  local n="${1:-40}" line t rest ip act det col w
+show_log() {  # [N] [server]
+  local n="${1:-40}" on="${2:-}" d t act srv det col w out lab
   [[ "$n" =~ ^[0-9]+$ ]] || n=40
-  [ -s "$LOG" ] || { note "Nothing yet."; return 0; }
-  w=$(( UI_COLS - 22 )); [ "$w" -lt 20 ] && w=20
-  ui_head "ACTIVITY" "last $n, newest at the bottom (UTC)"
+  out="$(adm log "$n" ${on:+"$on"} 2>/dev/null || true)"
+  [ -n "$out" ] || { note "Nothing yet."; return 0; }
+  w=$(( UI_COLS - 21 )); [ "$w" -lt 16 ] && w=16
+  ui_head "ACTIVITY" "last $n, newest last (UTC)"
   echo
-  while IFS= read -r line; do
-    t="${line%% *}"; rest="${line#* }"; ip="${rest%% *}"; rest="${rest#* }"
-    act="${rest%% *}"; det=""; [ "$rest" != "$act" ] && det="${rest#* }"
+  while IFS=$US read -r d t act srv det; do
+    lab="$act"; [ -n "$srv" ] && srv="[$srv] "
     case "$act" in
-      run) col="$C"; det="$(printf '%s' "$det" | sed -E 's/^job=[0-9a-f]+ cwd=[^ ]+( via=([^ ]+))? cmd=/[\2] /; s/^\[\] //')" ;;
-      done) local code secs
-            code="$(printf '%s' "$det" | sed -nE 's/.*exit=(-?[0-9]+).*/\1/p')"; secs="${det##* }"
-            if [ "$code" = 0 ]; then col="$G"; det="${S_OK:-ok} $secs"; else col="$RD"; det="${S_BAD:-x} exit $code · $secs"; fi ;;
-      upload | download | read) col="$M" ;;
-      kill | off) col="$RD" ;;
-      *) col="$Y" ;;
+      run) col="$C"; det="$srv$det" ;;
+      done) if [[ "$det" == "exit 0 "* ]]; then col="$G"; det="$srv${S_OK:-ok} ${det#exit 0 }"
+            else col="$RD"; det="$srv${S_BAD:-x} $det"; fi ;;
+      read | write) col="$M"; det="$srv$det" ;;
+      server-online) col="$G"; lab=online; det="${srv}connected" ;;
+      server-add) col="$Y"; lab=invite; det="${srv}join line made" ;;
+      join-download) col="$Y"; lab="join"; det="${srv}installing" ;;
+      server-remove | server-left) col="$RD"; lab=remove; det="${srv}removed" ;;
+      hub-moved) col="$Y"; lab=moved; det="$srv$det" ;;
+      key-add | key-remove | rotate | expire) col="$Y"; lab="${act/key-add/key+}"; lab="${lab/key-remove/key-}"; det="${det#@server}" ;;
+      kill | off) col="$RD"; det="$srv${det#@server}" ;;
+      *) col="$Y"; det="$srv${det#@server}" ;;
     esac
-    det="${det//\\n/${S_NL:- / }}"
     [ "${#det}" -gt "$w" ] && det="${det:0:$(( w - 1 ))}${S_ELL:-...}"
-    printf '  %s%s %s%s %s%-6s%s %s\n' "$D" "${t:5:5}" "${t:11:5}" "$R" "$col" "$act" "$R" "$det"
-    : "$ip"
-  done < <(tail -n "$n" "$LOG")
+    printf '  %s%s %s%s %s%-6.6s%s %s\n' "$D" "$d" "$t" "$R" "$col" "$lab" "$R" "$det"
+  done <<<"$out"
   echo
 }
 
-# ------------------------------------------------------------------ relays
-relay_pkgs() {
-  command -v ssh >/dev/null 2>&1 && command -v ssh-keygen >/dev/null 2>&1 && return 0
-  say "Installing the ssh client"
-  if command -v apt-get >/dev/null 2>&1; then apt-get update -qq >/dev/null 2>&1 || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-client sshpass >/dev/null 2>&1 || true
-  elif command -v dnf >/dev/null 2>&1; then dnf install -y -q openssh-clients sshpass >/dev/null 2>&1 || true
-  elif command -v yum >/dev/null 2>&1; then yum install -y -q openssh-clients sshpass >/dev/null 2>&1 || true
-  elif command -v apk >/dev/null 2>&1; then apk add -q openssh-client sshpass >/dev/null 2>&1 || true
-  fi
-  command -v ssh >/dev/null 2>&1 || { warn "could not install the ssh client"; return 1; }
-}
-
-this_ip() {  # this server's public IP (for the other server to dial back to)
-  local ip u
-  ip="${FATLLM_HOST:-}"
-  if ! [[ "$ip" =~ ^[0-9.]+$ ]]; then
-    ip=""
-    for u in https://api.ipify.org https://ipv4.icanhazip.com https://checkip.amazonaws.com; do
-      ip="$(curl -4 -fsS --max-time 6 "$u" 2>/dev/null | tr -d ' \r\n' || true)"
-      [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && break || ip=""
-    done
-  fi
-  echo "$ip"
-}
-
-port_live() {  # prints "up" if something listens on 127.0.0.1:$1
-  python3 - "$1" <<'PY'
-import socket, sys
-s = socket.socket(); s.settimeout(0.6)
-try:
-    s.connect(("127.0.0.1", int(sys.argv[1]))); print("up")
-except OSError:
-    pass
-finally:
-    s.close()
-PY
-}
-
-free_socks_port() {
-  python3 - "$RELAY_DIR" <<'PY'
-import glob, json, os, socket, sys
-used = set()
-for f in glob.glob(os.path.join(sys.argv[1], "*.json")):
-    try:
-        used.add(int(json.load(open(f)).get("socks_port", 0)))
-    except Exception:
-        pass
-for p in range(1080, 1200):
-    if p in used:
-        continue
-    s = socket.socket()
-    try:
-        s.bind(("127.0.0.1", p)); s.close(); print(p); break
-    except OSError:
-        s.close()
-PY
-}
-
-relay_add() {
-  local host="" user=root port=22 name="" pass=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --host) host="${2:-}"; shift 2 ;;
-      --user) user="${2:-}"; shift 2 ;;
-      --port) port="${2:-}"; shift 2 ;;
-      --name) name="${2:-}"; shift 2 ;;
-      *) warn "relay add: unknown option $1"; relay_usage; return 1 ;;
-    esac
-  done
-  [ -n "$host" ] || { relay_usage; return 1; }
-  [[ "$port" =~ ^[0-9]+$ ]] || { warn "--port must be a number"; return 1; }
-  [ -n "$name" ] || name="$(printf '%s' "$host" | tr -c 'a-zA-Z0-9' '-' | sed 's/^-*//; s/-*$//')"
-  [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || { warn "name may use letters, digits, - and _ only"; return 1; }
-
-  # Password: env RELAY_PASSWORD, else piped stdin, else hidden prompt. Used once, never stored.
-  if [ -n "${RELAY_PASSWORD:-}" ]; then pass="$RELAY_PASSWORD"
-  elif [ ! -t 0 ]; then pass="$(cat)"; pass="${pass%$'\n'}"
-  else printf '  Root password of %s@%s\n  %s(hidden, used once, NOT stored):%s ' "$user" "$host" "$D" "$R"; read -rs pass </dev/tty || true; echo; fi
-
-  relay_pkgs || return 1
-  mkdir -p "$RELAY_DIR"; chmod 700 "$RELAY_DIR"
-  local key="$RELAY_DIR/$name.key" kh="$RELAY_DIR/known_hosts"
-  [ -f "$key" ] || ssh-keygen -t ed25519 -N '' -C "fatllm-relay-$name" -f "$key" -q
-  chmod 600 "$key"
-  local sshopt=(-o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$kh" -o ConnectTimeout=20 -p "$port")
-
-  if [ -n "$pass" ]; then
-    command -v sshpass >/dev/null 2>&1 || { warn "sshpass is not available; add this key to $user@$host by hand:"; cat "$key.pub"; return 1; }
-    say "Installing an access key on $host"
-    local pub; pub="$(cat "$key.pub")"
-    if ! sshpass -p "$pass" ssh "${sshopt[@]}" "$user@$host" \
-        "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; grep -qxF '$pub' ~/.ssh/authorized_keys || printf '%s\n' '$pub' >> ~/.ssh/authorized_keys" 2>/dev/null; then
-      warn "Could not log in with that password (host/user/port/password?)."; return 1
+# ------------------------------------------------------------------ hub: servers
+add_server() {  # NAME [--no-wait]
+  local name="${1:-}" out cmd i st
+  [ -n "$name" ] || die "usage: fatllm add-server NAME   (a short name, e.g. iran)"
+  valid_name "$name" || die "a name uses letters, digits, - and _ (e.g. iran, de-1)"
+  [ "$name" != "${FATLLM_NAME:-main}" ] || die "'$name' is this hub's own name; pick another"
+  agent_up || die "FATLLM is off here. Turn it on first: fatllm on"
+  out="$(api POST /admin/servers "{\"name\": \"$name\"}")" || exit 1
+  cmd="$(printf '%s' "$out" | jq_py 'print(d["command"])')"
+  ui_head "ADD SERVER" "$name"
+  echo
+  note "1. SSH into the other server as root."
+  note "2. Paste this one line, press Enter:"
+  echo
+  printf '%s%s%s\n' "$G" "$cmd" "$R"
+  echo
+  ui_rule
+  note "Works once, within 2 hours. The other"
+  note "server dials out to this hub, so it needs"
+  note "no open port (fine for a server in Iran)."
+  ui_rule
+  [ "${2:-}" = --no-wait ] && return 0
+  [ "$UI_TTY" = 1 ] && [ -t 0 ] || return 0
+  echo
+  for i in $(seq 1 1800); do
+    st="$(servers_tsv 2>/dev/null | awk -F'\037' -v n="$name" '$1==n{print $2}')"
+    if [ "$st" = online ]; then
+      ok "$name connected. Your AI can use it:"
+      note "srv --on $name 'command'"
+      echo; return 0
     fi
-    pass=""; unset RELAY_PASSWORD
-    ok "Key installed (the password is not kept)"
+    ui_spin "Waiting for $name${S_ELL:-...} (Ctrl+C = stop)"
+    sleep 0.5
+    : "$i"
+  done
+  ui_spin_end
+}
+
+remove_server() {  # NAME [--uninstall]
+  local name="${1:-}" body out
+  [ -n "$name" ] || die "usage: fatllm remove-server NAME [--uninstall]"
+  valid_name "$name" || die "no server named $name (fatllm servers lists them)"
+  body="{\"name\": \"$name\"}"
+  [ "${2:-}" = --uninstall ] && body="{\"name\": \"$name\", \"uninstall\": true}"
+  out="$(api POST /admin/servers/remove "$body")" || exit 1
+  ok "$name removed. Its access ended."
+  if printf '%s' "$out" | grep -q '"uninstalled": true'; then ok "FATLLM was removed from $name too."
+  elif [ "${2:-}" = --uninstall ]; then note "$name is offline: run 'fatllm leave' on it."; fi
+}
+
+# ------------------------------------------------------------------ hub: keys
+show_keys() {
+  local out name exp last cur
+  if agent_up && out="$(api GET /admin/keys 2>/dev/null)"; then :; else out="$(adm keys | jq_py 'print(json.dumps({"keys": d}))')"; fi
+  ui_head "KEYS" "every key is full access"
+  echo
+  while IFS=$US read -r name exp last cur; do
+    if [ "$exp" = EXPIRED ]; then ui_dot bad "$name" "expired"
+    else ui_dot good "$name" "$exp $S_DOT_SEP used $last"; fi
+    : "$cur"
+  done < <(printf '%s' "$out" | jq_py '
+for k in d["keys"]:
+    e = k.get("expires") or 0
+    exp = "no expiry" if not e else ("EXPIRED" if e < time.time() else "until " + time.strftime("%m-%d %H:%M", time.localtime(e)))
+    lu = k.get("last_used")
+    last = "never" if not lu else ("%dm ago" % ((time.time() - lu) // 60) if time.time() - lu < 7200 else time.strftime("%m-%d", time.localtime(lu)))
+    print("\x1f".join((k["name"], exp, last, str(k.get("current", False)))))')
+  echo
+  note "fatllm keys add NAME [7d]   a separate key"
+  note "fatllm key NAME             show one"
+  note "fatllm keys remove NAME     cut it off"
+  echo
+}
+
+# ------------------------------------------------------------------ node (a server connected to a hub)
+node_state() {  # TSV: connected hub error age
+  adm node | jq_py '
+print("\x1f".join((str(d.get("connected", False)), d.get("hub", ""), d.get("error", ""), str(int(time.time() - d.get("time", 0)) if d.get("time") else -1))))' 2>/dev/null \
+    || printf 'False\037\037\037-1\n'
+}
+
+node_status() {
+  local con err age
+  IFS=$US read -r con _ err age < <(node_state)
+  ui_head "STATUS" "\"${FATLLM_NAME:-?}\" $S_DOT_SEP connected server"
+  echo
+  if agent_up; then ui_dot good "agent" "running"; else ui_dot bad "agent" "stopped (fatllm on)"; fi
+  if [ "$con" = True ] && [ "$age" -ge 0 ] && [ "$age" -lt 120 ]; then ui_dot good "hub" "connected"
+  elif agent_up; then ui_dot bad "hub" "${err:-not connected yet}"
+  else ui_dot off "hub" "-"; fi
+  echo
+  ui_rule
+  ui_kv "hub" "${FATLLM_HUB:-?}"
+  ui_kv "name" "${FATLLM_NAME:-?}"
+  ui_rule
+  note "It dials out to the hub: no open port"
+  note "needed. Key and panel live on the hub."
+  echo
+}
+
+node_leave() {  # [-y]
+  if [ "${1:-}" != -y ]; then
+    printf '  Remove FATLLM from this server? Type %syes%s: ' "$B" "$R"
+    read -r ans </dev/tty || ans=""
+    [ "$ans" = yes ] || { note "Cancelled."; exit 0; }
   fi
+  if adm leave >/dev/null 2>&1; then ok "The hub forgot this server."
+  else warn "The hub did not answer; remove it there too: fatllm remove-server ${FATLLM_NAME:-NAME}"; fi
+  uninstall_local
+}
 
-  if ! ssh -o BatchMode=yes "${sshopt[@]}" -i "$key" "$user@$host" 'echo FATLLM_RELAY_OK' 2>/dev/null | grep -q FATLLM_RELAY_OK; then
-    warn "Key login failed. Add this key to $user@$host (~/.ssh/authorized_keys), then retry:"
-    cat "$key.pub"; return 1
-  fi
-  ok "Key login works"
-
-  local socks; socks="$(free_socks_port)"
-  [ -n "$socks" ] || { warn "no free local port for the tunnel"; return 1; }
-  local ssh_bin; ssh_bin="$(command -v ssh)"
-  cat > "/etc/systemd/system/fatllm-relay-$name.service" <<EOF
-[Unit]
-Description=FATLLM relay $name (SOCKS proxy via $host)
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=0
-
-[Service]
-ExecStart=$ssh_bin -NT -D 127.0.0.1:$socks -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$kh -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=20 -i $key -p $port $user@$host
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  umask 077
-  cat > "$RELAY_DIR/$name.json" <<EOF
-{"name":"$name","host":"$host","user":"$user","port":$port,"socks_port":$socks,"note":"SOCKS5 127.0.0.1:$socks via $host"}
-EOF
-  umask 022
+uninstall_local() {
+  systemctl disable --now fatllm fatllm-caddy >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/fatllm.service /etc/systemd/system/fatllm-caddy.service
   systemctl daemon-reload
-  systemctl enable --now "fatllm-relay-$name" >/dev/null 2>&1
-  ui_wait "Starting the relay" 2
-  ok "Relay '$name' is set up"
-  relay_test "$name" || true
-  note "Tell your AI: srv --via $name 'curl -s https://mixin.ir'"
-  echo
-}
-
-is_reverse() { local r; r="$(json_get "$1" reverse)"; [ "$r" = True ] || [ "$r" = true ]; }
-
-relay_list() {
-  local f n s host any=0
-  ui_head "RELAYS"
-  echo
-  for f in "$RELAY_DIR"/*.json; do
-    [ -e "$f" ] || continue
-    any=1; n="$(json_get "$f" name)"; s="$(json_get "$f" socks_port)"; host="$(json_get "$f" host)"
-    if is_reverse "$f"; then
-      if [ "$(port_live "$s")" = up ]; then ui_dot good "$n" "reverse · socks :$s · up"
-      else ui_dot bad "$n" "reverse · the other server hasn't dialed in yet"; fi
-    elif systemctl is-active --quiet "fatllm-relay-$n" 2>/dev/null; then ui_dot good "$n" "via $host · socks :$s"
-    else ui_dot bad "$n" "down · via $host"; fi
-  done
-  [ "$any" = 1 ] || note "No relays yet. Add one: fatllm relay add --host IP --name iran"
-  echo
-}
-
-relay_test() {
-  local n="$1" f="$RELAY_DIR/$1.json"
-  [ -f "$f" ] || { warn "no such relay: $n"; return 1; }
-  local s here out_ip hint="systemctl status fatllm-relay-$n"
-  s="$(json_get "$f" socks_port)"
-  is_reverse "$f" && hint="run the paste block on the other server (fatllm relay reverse add $n shows it again)"
-  here="$(curl -fsS --max-time 15 https://api.ipify.org 2>/dev/null || echo '?')"
-  out_ip="$(curl -fsS --max-time 25 --socks5-hostname "127.0.0.1:$s" https://api.ipify.org 2>/dev/null || true)"
-  ui_kv "this IP" "$here"
-  if [ -n "$out_ip" ]; then ui_kv "via $n" "$out_ip"; ok "Relay '$n' works"
-  else warn "Relay '$n' is not working yet ($hint)"; return 1; fi
-}
-
-relay_remove() {
-  local n="$1"; local f="$RELAY_DIR/$n.json"
-  [ -f "$f" ] || { warn "no such relay: $n"; return 1; }
-  if is_reverse "$f"; then
-    if [ -f "${FATLLM_AUTHKEYS:-/root/.ssh/authorized_keys}" ]; then
-      grep -vF "fatllm-reverse-$n" "${FATLLM_AUTHKEYS:-/root/.ssh/authorized_keys}" > "$RELAY_DIR/.ak.tmp" 2>/dev/null || true
-      mv "$RELAY_DIR/.ak.tmp" "${FATLLM_AUTHKEYS:-/root/.ssh/authorized_keys}"; chmod 600 "${FATLLM_AUTHKEYS:-/root/.ssh/authorized_keys}"
-    fi
-    rm -f "$f" "$RELAY_DIR/$n-rev.key" "$RELAY_DIR/$n-rev.key.pub"
-    ok "Reverse relay '$n' removed here."
-    note "On the other server also run: systemctl disable --now fatllm-out-$n"
-  else
-    systemctl disable --now "fatllm-relay-$n" >/dev/null 2>&1 || true
-    rm -f "/etc/systemd/system/fatllm-relay-$n.service" "$f" "$RELAY_DIR/$n.key" "$RELAY_DIR/$n.key.pub"
-    systemctl daemon-reload
-    ok "Relay '$n' removed"
-  fi
-}
-
-# Reverse relay: the OTHER server (one that can't be reached from outside, e.g. in Iran)
-# dials OUT to this FATLLM host and gives it a SOCKS port that exits there. Set up on THIS host;
-# it prints a self-contained block to paste on the other server.
-relay_reverse_add() {
-  local name="iran" sshport=22 from=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --name) name="${2:-}"; shift 2 ;;
-      --ssh-port) sshport="${2:-}"; shift 2 ;;
-      --from) from="${2:-}"; shift 2 ;;
-      *) warn "relay reverse add: unknown option $1"; return 1 ;;
-    esac
-  done
-  [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || { warn "name may use letters, digits, - and _"; return 1; }
-  [[ "$sshport" =~ ^[0-9]+$ ]] || { warn "--ssh-port must be a number"; return 1; }
-  command -v ssh-keygen >/dev/null 2>&1 || relay_pkgs || return 1
-  mkdir -p "$RELAY_DIR"; chmod 700 "$RELAY_DIR"
-
-  local myip; myip="$(this_ip)"
-  [ -n "$myip" ] || warn "could not detect this server's public IP; put it into the block by hand"
-
-  local key="$RELAY_DIR/$name-rev.key"
-  if [ ! -f "$key" ]; then ssh-keygen -t ed25519 -N '' -C "fatllm-reverse-$name" -f "$key" -q; fi
-  chmod 600 "$key"
-  local socks; socks="$(free_socks_port)"
-  [ -n "$socks" ] || { warn "no free local port"; return 1; }
-
-  # Restricted authorized_keys entry: this key may ONLY open port forwards, never get a shell.
-  local ak="${FATLLM_AUTHKEYS:-/root/.ssh/authorized_keys}"
-  mkdir -p "$(dirname "$ak")"; chmod 700 "$(dirname "$ak")"
-  touch "$ak"; chmod 600 "$ak"
-  local opts="restrict,port-forwarding"
-  [ -n "$from" ] && opts="$opts,from=\"$from\""
-  grep -vF "fatllm-reverse-$name" "$ak" > "$RELAY_DIR/.ak.tmp" 2>/dev/null || true
-  mv "$RELAY_DIR/.ak.tmp" "$ak"
-  printf '%s %s\n' "$opts" "$(cat "$key.pub")" >> "$ak"
-  chmod 600 "$ak"
-
-  umask 077
-  cat > "$RELAY_DIR/$name.json" <<EOF
-{"name":"$name","host":"${from:-reverse}","user":"root","port":$sshport,"socks_port":$socks,"reverse":true,"note":"reverse SOCKS 127.0.0.1:$socks (dialed in from the other server)"}
-EOF
-  umask 022
-
-  local priv; priv="$(cat "$key")"
-  ui_head "REVERSE RELAY '$name'" "runs through this server ($myip)"
-  note "Paste this WHOLE block on your OTHER server as root"
-  note "(the one that can't be reached from outside, e.g. in Iran):"
-  echo
-  cat <<PASTE
-# ===== FATLLM reverse relay '$name' -> $myip =====
-install -d -m 700 /etc/fatllm
-cat > /etc/fatllm/$name-rev.key <<'FATLLMKEY'
-$priv
-FATLLMKEY
-chmod 600 /etc/fatllm/$name-rev.key
-command -v ssh >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq openssh-client; } 2>/dev/null || yum install -y -q openssh-clients 2>/dev/null || apk add -q openssh-client 2>/dev/null || true
-cat > /etc/systemd/system/fatllm-out-$name.service <<'FATLLMUNIT'
-[Unit]
-Description=FATLLM reverse relay to $myip
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=0
-
-[Service]
-ExecStart=/usr/bin/env ssh -NT -R 127.0.0.1:$socks -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/etc/fatllm/$name-known_hosts -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=20 -i /etc/fatllm/$name-rev.key -p $sshport root@$myip
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-FATLLMUNIT
-systemctl daemon-reload && systemctl enable --now fatllm-out-$name
-sleep 3 && systemctl is-active --quiet fatllm-out-$name && echo "OK: reverse relay '$name' is up" || { echo "FAILED:"; journalctl -u fatllm-out-$name -n 12 --no-pager; }
-# ===== end =====
-PASTE
-  echo
-  note "After pasting it there, come back here and run:  fatllm relay test $name"
-  note "Then your AI uses it:  srv --via $name 'curl -s https://mixin.ir'"
-  echo
+  rm -rf /opt/fatllm /etc/fatllm /var/lib/fatllm /var/log/fatllm
+  rm -f /usr/local/bin/fatllm
+  ok "FATLLM removed from this server."
 }
 
 # ------------------------------------------------------------------ interactive menu
@@ -533,205 +343,277 @@ ask() { local a; printf '%s' "$1" >&2; read -r a </dev/tty || a=""; printf '%s' 
 pause() { printf '\n  %sPress Enter to go back%s' "$D" "$R"; read -r _ </dev/tty || true; }
 yes_no() { local a; a="$(ask "  $1 [y/N] ")"; [ "$a" = y ] || [ "$a" = Y ] || [ "$a" = yes ]; }
 sub() { bash "$SELF" "$@" || true; }
+clear_screen() { [ "$UI_TTY" = 1 ] && printf '\033[H\033[2J' || true; }
 
-menu_header() {
-  local st port
-  printf '\033[H\033[2J'
-  ui_logo "full server access for AI agents"
-  if systemctl is-active --quiet fatllm 2>/dev/null; then st="${G}${S_DOT:-*} online${R}"; else st="${RD}${S_DOT:-*} off${R}"; fi
-  port="${FATLLM_PORT:-}"; [ -n "$port" ] && port=" :$port"
-  printf '  %s  %s%s%s  %s%s%s\n' "$st" "$B" "$(hostname 2>/dev/null || echo server)" "$R" "$D" "${FATLLM_MODE:-caddy}$port" "$R"
-  printf '  %skey expires%s %s  %srelays%s %s\n' "$D" "$R" "$(expires_label)" "$D" "$R" "$(relay_units | wc -w | tr -d ' ')"
-  ui_rule
+menu_items() {  # print "N|label" items in one or two columns
+  local items=("$@") i half left right
+  if [ "${UI_COLS:-80}" -ge 64 ]; then
+    half=$(( (${#items[@]} + 1) / 2 ))
+    for ((i = 0; i < half; i++)); do
+      left="${items[i]}"; right="${items[i + half]:-}"
+      printf '  %s%3s%s  %-24s' "$A" "${left%%|*}" "$R" "${left#*|}"
+      [ -n "$right" ] && printf '%s%3s%s  %s' "$A" "${right%%|*}" "$R" "${right#*|}"
+      echo
+    done
+  else
+    for i in "${items[@]}"; do printf '  %s%3s%s  %s\n' "$A" "${i%%|*}" "$R" "${i#*|}"; done
+  fi
   echo
 }
 
-menu() {
-  need_root; load
-  local items ch i half on_off left right
+hub_menu() {
+  local ch onoff total online st kexp
   while true; do
     load
-    menu_header
-    if systemctl is-active --quiet fatllm 2>/dev/null; then on_off="Turn access OFF"; else on_off="Turn access ON"; fi
-    items=("1|Show key" "2|Web panel link" "3|Status & self-test" "4|Activity log" "5|$on_off"
-           "6|New key (rotate)" "7|Key expiry" "8|Change port" "9|Relays" "10|Reachability mode"
-           "11|Update FATLLM" "0|Exit")
-    if [ "${UI_COLS:-80}" -ge 64 ]; then
-      half=$(( (${#items[@]} + 1) / 2 ))
-      for ((i = 0; i < half; i++)); do
-        left="${items[i]}"; right="${items[i + half]:-}"
-        printf '  %s%3s%s  %-24s' "$Y" "${left%%|*}" "$R" "${left#*|}"
-        [ -n "$right" ] && printf '%s%3s%s  %s' "$Y" "${right%%|*}" "$R" "${right#*|}"
-        echo
-      done
-    else
-      for i in "${items[@]}"; do printf '  %s%3s%s  %s\n' "$Y" "${i%%|*}" "$R" "${i#*|}"; done
-    fi
+    clear_screen
+    ui_logo "full server access for AI agents"
+    total=1 online=1
+    if agent_up; then
+      st="${G}${S_DOT:-*} on${R}"
+      while IFS=$US read -r _ s _; do
+        [ "$s" = hub ] && continue
+        [ "$s" = joining ] && continue
+        total=$(( total + 1 )); [ "$s" = online ] && online=$(( online + 1 ))
+      done < <(servers_tsv 2>/dev/null || true)
+    else st="${RD}${S_DOT:-*} off${R}"; fi
+    printf '  %s  %s%s%s  %s:%s %s %s%s\n' "$st" "$B" "${FATLLM_NAME:-main}" "$R" "$D" "${FATLLM_PORT:-?}" "$S_DOT_SEP" "$(mode_label)" "$R"
+    kexp="$(key_expiry main)"; case "$kexp" in never) kexp="no expiry" ;; EXPIRED | "?") ;; *) kexp="until ${kexp#????-}" ;; esac
+    printf '  %sservers%s %s/%s online  %skey%s %s\n' "$D" "$R" "$online" "$total" "$D" "$R" "$kexp"
+    ui_rule
     echo
+    if agent_up; then onoff="Turn access OFF"; else onoff="Turn access ON"; fi
+    menu_items "1|Show key + panel" "2|Servers" "3|Connect a server" "4|Status & test" "5|Activity log" \
+      "6|$onoff" "7|New key (rotate)" "8|Key expiry" "9|Extra keys" "10|Port & certificate" \
+      "11|Update everything" "0|Exit"
     ch="$(ask "  ${B}Choose a number:${R} ")"
     case "$ch" in
       1) sub key; pause ;;
-      2) base="$(public_base 2>/dev/null || true)"
-         if [ -n "$base" ]; then
-           ui_head "PANEL" "secret, like the key"
-           printf '  %s%s/%s/panel%s\n' "$C" "$base" "$FATLLM_TOKEN" "$R"
-           [ "${FATLLM_MODE:-caddy}" = direct ] && { echo; note "Self-signed: the browser warns once (Advanced > Proceed)."; }
-         else warn "No address yet; try again in a minute."; fi
+      2) clear_screen; ui_head "SERVERS"; print_servers || true; echo
+         printf '  %s1%s connect   %s2%s remove   %s0%s back\n' "$A" "$R" "$A" "$R" "$A" "$R"
+         case "$(ask "  Choose: ")" in
+           1) n="$(ask "  Short name for it (e.g. iran): ")"; [ -n "$n" ] && sub add-server "$n" ;;
+           2) n="$(ask "  Name to remove: ")"
+              if [ -n "$n" ] && yes_no "Remove $n? Its access ends at once."; then
+                if yes_no "Also uninstall FATLLM on $n (if online)?"; then sub remove-server "$n" --uninstall
+                else sub remove-server "$n"; fi
+              fi ;;
+         esac
          pause ;;
-      3) sub status; pause ;;
-      4) sub log 30; pause ;;
-      5) if systemctl is-active --quiet fatllm 2>/dev/null; then
-           yes_no "Turn access off? The key stops until you turn it on." && sub off
+      3) n="$(ask "  Name for the new server (e.g. iran): ")"; [ -n "$n" ] && sub add-server "$n"; pause ;;
+      4) sub status; pause ;;
+      5) sub log 30; pause ;;
+      6) if agent_up; then yes_no "Turn access off?" && sub off
          else sub on; fi
          pause ;;
-      6) yes_no "Make a new key? The current key stops at once." && sub rotate; pause ;;
-      7) echo
-         printf '  %s1%s  1 hour   %s2%s  24 hours   %s3%s  7 days   %s4%s  never\n' "$Y" "$R" "$Y" "$R" "$Y" "$R" "$Y" "$R"
-         case "$(ask "  Key stops working after: ")" in
+      7) yes_no "New main key? The old one stops." && sub rotate; pause ;;
+      8) echo
+         printf '  %s1%s 1 hour  %s2%s 24 hours  %s3%s 7 days  %s4%s never\n' "$A" "$R" "$A" "$R" "$A" "$R" "$A" "$R"
+         case "$(ask "  Main key stops working after: ")" in
            1) sub expire 1h ;; 2) sub expire 24h ;; 3) sub expire 7d ;; 4) sub expire never ;; *) note "Unchanged." ;;
          esac
          pause ;;
-      8) if [ "${FATLLM_MODE:-caddy}" = tunnel ]; then warn "Tunnel mode has no port. Switch with: 10 > direct"
-         else
-           echo; note "Now: ${FATLLM_PORT:-?}. Enter = a random free port (9001-9999)."
-           p="$(ask "  New port: ")"
-           if [ -z "$p" ]; then p=random; fi
-           if [ "$p" = random ] || [[ "$p" =~ ^[0-9]+$ ]]; then
-             yes_no "Move to port $p? The key's address changes." && sub port "$p"
-           else warn "Not a number."; fi
-         fi
-         pause ;;
-      9) sub relay list
-         printf '  %s1%s  add (this reaches the other)\n' "$Y" "$R"
-         printf '  %s2%s  reverse (other reaches here — Iran)\n' "$Y" "$R"
-         printf '  %s3%s  test    %s4%s  remove    %s0%s  back\n' "$Y" "$R" "$Y" "$R" "$Y" "$R"
+      9) clear_screen; sub keys
+         printf '  %s1%s add   %s2%s show   %s3%s remove   %s0%s back\n' "$A" "$R" "$A" "$R" "$A" "$R" "$A" "$R"
          case "$(ask "  Choose: ")" in
-           1) h="$(ask "  Other server IP: ")"; u="$(ask "  User [root]: ")"; n="$(ask "  Short name (e.g. iran): ")"
-              [ -n "$h" ] && sub relay add --host "$h" --user "${u:-root}" ${n:+--name "$n"} ;;
-           2) n="$(ask "  Short name [iran]: ")"; sub relay reverse add ${n:+--name "$n"} ;;
-           3) n="$(ask "  Relay name: ")"; [ -n "$n" ] && sub relay test "$n" ;;
-           4) n="$(ask "  Relay name: ")"; [ -n "$n" ] && yes_no "Remove relay $n?" && sub relay remove "$n" ;;
+           1) n="$(ask "  Name for the new key (e.g. gpt): ")"; [ -n "$n" ] && sub keys add "$n" ;;
+           2) n="$(ask "  Key name: ")"; [ -n "$n" ] && sub key "$n" ;;
+           3) n="$(ask "  Key name to remove: ")"; [ -n "$n" ] && yes_no "Remove key $n?" && sub keys remove "$n" ;;
          esac
          pause ;;
       10) echo
-          printf '  %s1%s  caddy   real certificate (needs port 80 free)\n' "$Y" "$R"
-          printf '  %s2%s  direct  self-signed, stable (best for Claude Code)\n' "$Y" "$R"
-          printf '  %s3%s  tunnel  Cloudflare (address changes on restart)\n' "$Y" "$R"
-          case "$(ask "  Mode: ")" in
-            1) sub mode caddy ;; 2) sub mode direct ;; 3) sub mode tunnel ;; *) note "Unchanged." ;;
+          note "Now: port ${FATLLM_PORT:-?}, $(mode_label)."
+          printf '  %s1%s new port  %s2%s self-signed  %s3%s public cert\n' "$A" "$R" "$A" "$R" "$A" "$R"
+          case "$(ask "  Choose: ")" in
+            1) p="$(ask "  New port (Enter = random 9001-9999): ")"; p="${p:-random}"
+               if [ "$p" = random ] || [[ "$p" =~ ^[0-9]+$ ]]; then
+                 yes_no "Move to port $p? (the key changes)" && sub port "$p"
+               else warn "Not a number."; fi ;;
+            2) sub mode direct ;;
+            3) d="$(ask "  Your domain (Enter = <ip>.sslip.io): ")"; sub mode cert ${d:+--domain "$d"} ;;
           esac
           pause ;;
       11) sub update; pause ;;
-      0 | q | Q | exit) printf '\033[H\033[2J'; exit 0 ;;
+      0 | q | Q | exit) clear_screen; exit 0 ;;
       *) ;;
     esac
   done
 }
 
+node_menu() {
+  local ch con st
+  while true; do
+    load
+    clear_screen
+    ui_logo "connected server"
+    IFS=$US read -r con _ _ _ < <(node_state)
+    if agent_up && [ "$con" = True ]; then st="${G}${S_DOT:-*} connected${R}"
+    elif agent_up; then st="${Y}${S_DOT:-*} connecting${R}"; else st="${RD}${S_DOT:-*} off${R}"; fi
+    printf '  %s  %s%s%s\n' "$st" "$B" "${FATLLM_NAME:-?}" "$R"
+    printf '  %shub%s %s\n' "$D" "$R" "${FATLLM_HUB:-?}"
+    ui_rule
+    echo
+    if agent_up; then onoff="Turn access OFF"; else onoff="Turn access ON"; fi
+    menu_items "1|Status" "2|Activity log" "3|$onoff" "4|Leave the hub" "0|Exit"
+    ch="$(ask "  ${B}Choose a number:${R} ")"
+    case "$ch" in
+      1) sub status; pause ;;
+      2) sub log 30; pause ;;
+      3) if agent_up; then sub off; else sub on; fi; pause ;;
+      4) sub leave; pause ;;
+      0 | q | Q | exit) clear_screen; exit 0 ;;
+      *) ;;
+    esac
+  done
+}
+
+usage() {
+  ui_logo
+  if [ -f "$CONF" ] && grep -q '^FATLLM_ROLE=node' "$CONF" 2>/dev/null; then
+    ui_cmd "fatllm" "menu"
+    ui_cmd "fatllm status" "connected to the hub?"
+    ui_cmd "fatllm log [N]" "what the AI did here"
+    ui_cmd "fatllm off / on" "cut / restore access"
+    ui_cmd "fatllm leave" "remove FATLLM here"
+    echo; return
+  fi
+  ui_head "EVERYDAY"
+  ui_cmd "fatllm" "menu, every option"
+  ui_cmd "fatllm key" "key + web panel link"
+  ui_cmd "fatllm status" "running? servers?"
+  ui_cmd "fatllm log [N]" "what the AI did"
+  ui_head "SERVERS"
+  ui_cmd "fatllm add-server N" "connect a server"
+  ui_cmd "fatllm servers" "list them"
+  ui_cmd "fatllm remove-server N" ""
+  ui_head "SECURITY"
+  ui_cmd "fatllm rotate" "new key, old one dies"
+  ui_cmd "fatllm expire T" "30m|12h|7d|never"
+  ui_cmd "fatllm keys" "extra keys"
+  ui_cmd "fatllm off / on" "turn access off / on"
+  ui_head "MAINTENANCE"
+  ui_cmd "fatllm port N" "N or random"
+  ui_cmd "fatllm mode M" "direct or cert"
+  ui_cmd "fatllm update" "update hub + servers"
+  ui_cmd "fatllm uninstall" "remove everything"
+  echo
+}
+
 # ------------------------------------------------------------------ commands
 if [ $# -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then set -- menu; fi
-cmd="${1:-key}"
+cmd="${1:-}"
 [ $# -gt 0 ] && shift
 case "$cmd" in
-  menu)
-    menu ;;
-  key | show)
-    need_root; load; show_key ;;
+  help | -h | --help) usage; exit 0 ;;
+  version | --version) sed -n 's/^VERSION = "\(.*\)"/\1/p' "$APP/agent.py" 2>/dev/null; exit 0 ;;
+esac
+need_root "$cmd"
+load
+
+if is_node; then
+  case "${cmd:-status}" in
+    menu) node_menu ;;
+    status | key | show | test | servers) node_status
+      [ "$cmd" = key ] && note "Run 'fatllm key' on the hub (${FATLLM_HUB:-?})." ;;
+    log | logs) show_log "${1:-40}" ;;
+    off | stop) systemctl disable --now fatllm >/dev/null 2>&1 || true
+      ok "Access to this server is off (fatllm on to restore)." ;;
+    on | start) systemctl enable --now fatllm >/dev/null 2>&1; ui_wait "Connecting" 3; node_status ;;
+    leave | uninstall | remove) node_leave "${1:-}" ;;
+    update) note "Updates come from the hub: run 'fatllm update' there."
+      note "It updates every connected server at once." ;;
+    *) usage; exit 1 ;;
+  esac
+  exit 0
+fi
+
+case "${cmd:-key}" in
+  menu) hub_menu ;;
+  key | show) show_key "${1:-}" ;;
+  status) show_status ;;
+  log | logs)
+    n=40 on=""
+    while [ $# -gt 0 ]; do case "$1" in --on) on="${2:-}"; shift 2 ;; *) n="$1"; shift ;; esac; done
+    show_log "$n" "$on" ;;
+  servers | server)
+    case "${1:-list}" in
+      list | ls) ui_head "SERVERS"; print_servers; echo ;;
+      add) shift; add_server "$@" ;;
+      remove | rm) shift; remove_server "$@" ;;
+      *) die "usage: fatllm servers [add NAME | remove NAME]" ;;
+    esac ;;
+  add-server | join) add_server "$@" ;;
+  remove-server) remove_server "$@" ;;
+  keys)
+    case "${1:-list}" in
+      list | ls) show_keys ;;
+      add) [ -n "${2:-}" ] || die "usage: fatllm keys add NAME [7d]"
+        adm add "$2" ${3:+"$3"} >/dev/null || exit 1
+        ok "Key '$2' made (remove it any time)."
+        show_key "$2" ;;
+      show) show_key "${2:-}" ;;
+      remove | rm) [ -n "${2:-}" ] || die "usage: fatllm keys remove NAME"
+        adm remove "$2" >/dev/null || exit 1
+        ok "Key '$2' removed; it stopped working." ;;
+      *) die "usage: fatllm keys [add NAME [T] | show NAME | remove NAME]" ;;
+    esac ;;
   rotate | new-key)
-    need_root; load
-    set_conf FATLLM_TOKEN "$(new_token)"
-    load; restart_agent
-    ok "New key made. The old key stopped working."
-    show_key ;;
+    adm rotate ${1:+"$1"} >/dev/null || exit 1
+    ok "New key made; the old one stopped."
+    note "Connected servers are not affected."
+    show_key "${1:-}" ;;
+  expire)
+    [ -n "${1:-}" ] || die "usage: fatllm expire 30m | 12h | 7d | never [key name]"
+    exp="$(adm expire "$1" ${2:+"$2"})" || exit 1
+    if [ "$exp" = 0 ]; then ok "The key never expires."; else ok "Key stops working at $(fmt_time "$exp")."; fi ;;
   off | stop)
-    need_root; load
     # shellcheck disable=SC2046
-    systemctl disable --now $UNITS $(relay_units) >/dev/null 2>&1 || true
-    ok "FATLLM is off. Nobody can use the key until: fatllm on" ;;
+    systemctl disable --now $(units) >/dev/null 2>&1 || true
+    ok "Off. No key works until: fatllm on"
+    note "Servers reconnect when it's back on." ;;
   on | start)
-    need_root; load
     # shellcheck disable=SC2046
-    systemctl enable --now $(units_for_mode) $(relay_units) >/dev/null 2>&1
-    ui_wait "Starting" 2
+    systemctl enable --now $(units) >/dev/null 2>&1
+    for _ in $(seq 1 20); do api GET /info >/dev/null 2>&1 && break; ui_wait "Starting" 1; done
+    ui_spin_end
     ok "FATLLM is on."
     show_key ;;
-  status)
-    need_root; load; show_status ;;
-  log | logs)
-    need_root; show_log "${1:-40}" ;;
-  expire)
-    need_root; load
-    v="${1:-}"
-    case "$v" in
-      never | 0) exp=0 ;;
-      *[0-9]m) exp=$(( $(date +%s) + ${v%m} * 60 )) ;;
-      *[0-9]h) exp=$(( $(date +%s) + ${v%h} * 3600 )) ;;
-      *[0-9]d) exp=$(( $(date +%s) + ${v%d} * 86400 )) ;;
-      *) die "usage: fatllm expire 30m | 12h | 7d | never" ;;
-    esac
-    set_conf FATLLM_EXPIRES "$exp"
-    load; restart_agent
-    if [ "$exp" = 0 ]; then ok "The key never expires."; else ok "The key stops working at $(fmt_time "$exp")."; fi ;;
   test)
-    need_root; load
-    base="$(public_base)" || die "no address yet"
-    if check "$base"; then ok "The key works ($base)."; else die "The key does not work. Check: fatllm status"; fi ;;
+    if api GET /info >/dev/null; then ok "The agent answers (port ${FATLLM_PORT:-?})."
+    else die "No answer. See: fatllm status"; fi ;;
   port)
-    need_root; load
     p="${1:-}"
-    { [ "$p" = random ] || [[ "$p" =~ ^[0-9]+$ ]]; } || die "usage: fatllm port <number|random>   (now: ${FATLLM_PORT:-none})"
-    case "${FATLLM_MODE:-caddy}" in
-      tunnel) die "Tunnel mode has no port. Use: fatllm mode direct --port $p" ;;
-      direct) run_installer --direct --port "$p" ;;
-      *) run_installer --port "$p" ;;
-    esac ;;
-  relay)
-    need_root; load
-    mkdir -p "$RELAY_DIR"; chmod 700 "$RELAY_DIR"
-    action="${1:-list}"; [ $# -gt 0 ] && shift
-    case "$action" in
-      add) relay_add "$@" ;;
-      reverse | rev)
-        sub2="${1:-add}"; [ $# -gt 0 ] && shift
-        case "$sub2" in
-          add | "") relay_reverse_add "$@" ;;
-          *) warn "usage: fatllm relay reverse add [--name iran] [--ssh-port 22] [--from IP]" ;;
-        esac ;;
-      list | ls) relay_list ;;
-      test) [ -n "${1:-}" ] || die "usage: fatllm relay test <name>"; relay_test "$1" ;;
-      remove | rm | del) [ -n "${1:-}" ] || die "usage: fatllm relay remove <name>"; relay_remove "$1" ;;
-      help | -h | --help) relay_usage ;;
-      *) relay_usage; exit 1 ;;
-    esac ;;
+    { [ "$p" = random ] || [[ "$p" =~ ^[0-9]+$ ]]; } || die "usage: fatllm port <number|random>   (now: ${FATLLM_PORT:-?})"
+    run_installer --port "$p" ;;
   mode)
-    need_root
     m="${1:-}"; [ $# -gt 0 ] && shift
     case "$m" in
-      caddy) run_installer "$@" ;;
-      direct | selfsigned) run_installer --direct "$@" ;;
-      tunnel) run_installer --tunnel "$@" ;;
-      *) die "usage: fatllm mode caddy|direct|tunnel [--port N] [--domain NAME]" ;;
+      direct | selfsigned | self-signed) run_installer --no-cert "$@" ;;
+      cert | caddy | public) run_installer --cert "$@" ;;
+      tunnel) die "the tunnel mode was removed: it was unstable. 'direct' (default) works everywhere." ;;
+      *) die "usage: fatllm mode direct | cert [--domain NAME]" ;;
     esac ;;
   update)
-    need_root
-    run_installer --update "$@" ;;
+    run_installer "$@" ;;
   uninstall | remove)
-    need_root
-    if [ "${1:-}" != "-y" ]; then
-      printf '  Remove FATLLM and its key from this server? Type %syes%s: ' "$B" "$R"
+    yes=0 all=0
+    for o in "$@"; do case "$o" in -y) yes=1 ;; --all) all=1 ;; esac; done
+    if [ "$yes" = 0 ]; then
+      printf '  Remove FATLLM and all keys? Type %syes%s: ' "$B" "$R"
       read -r ans </dev/tty || ans=""
       [ "$ans" = yes ] || { note "Cancelled."; exit 0; }
+      if [ "$all" = 0 ] && agent_up && [ -n "$(servers_tsv 2>/dev/null | awk -F'\037' '$2!="hub"')" ]; then
+        yes_no "Also remove it from connected servers?" && all=1
+      fi
     fi
-    # shellcheck disable=SC2046
-    systemctl disable --now $UNITS $(relay_units) >/dev/null 2>&1 || true
-    # shellcheck disable=SC2046
-    for u in $UNITS $(relay_units); do rm -f "/etc/systemd/system/$u.service"; done
-    systemctl daemon-reload
-    rm -rf /opt/fatllm /etc/fatllm "$STATE" /var/log/fatllm
-    rm -f /usr/local/bin/fatllm
-    ok "FATLLM removed. The key no longer works." ;;
-  help | -h | --help)
-    usage ;;
-  *)
-    usage; exit 1 ;;
+    if [ "$all" = 1 ] && agent_up; then
+      while IFS=$US read -r n s _; do
+        [ "$s" = hub ] && continue
+        if api POST /admin/servers/remove "{\"name\": \"$n\", \"uninstall\": true}" 2>/dev/null | grep -q '"uninstalled": true'; then
+          ok "Removed from $n"
+        else warn "$n: offline; there run 'fatllm leave'"; fi
+      done < <(servers_tsv 2>/dev/null || true)
+    fi
+    uninstall_local
+    note "Every key stopped working." ;;
+  *) usage; exit 1 ;;
 esac

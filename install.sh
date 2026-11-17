@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
-# FATLLM installer: one command on your server, and you get a key that gives Claude
-# full (root) access to it.
+# FATLLM installer: one command on a server you can reach from the internet (the "hub"); it gives
+# you a key that lets an AI agent work on it, and on every other server you connect to it, as root.
 #
 #   bash <(curl -Ls https://raw.githubusercontent.com/SaeedCrazy/FATLLM-FULL-ACCESS-TO-LLM-/HEAD/install.sh)
 #
-# Options (after the command: bash <(curl ...) --domain my.example.com):
-#   --domain NAME   use your own domain (its DNS A record must point to this server)
-#   --port N        HTTPS port (default 9001, or a random free one in 9002-9999; "random" picks one)
-#   --direct        serve HTTPS from the agent itself with a self-signed cert on a free port
-#                   (stable address, no port 80/443 or Cloudflare needed; works with Claude Code,
-#                   not with the claude.ai connector which needs a public certificate)
-#   --tunnel        use a Cloudflare quick tunnel instead (no open port; address changes on restart)
-#   --email ADDR    e-mail for the Let's Encrypt account (optional)
-#   --expire T      the key stops working after T (30m, 12h, 7d)
-#   --new-key       make a new key even if one exists
-#   --local         use the files next to this script instead of downloading (for development)
-# Running it again repairs/updates the install and keeps the key.
+# Other servers (e.g. one in Iran that can't be reached from outside) are not installed with this:
+# run `fatllm add-server NAME` on the hub and paste the line it prints on the other server.
+#
+# Options (after the command: bash <(curl ...) --port 9123):
+#   --port N|random   HTTPS port (default 9001, else a random free one in 9002-9999; never 80/443)
+#   --cert            also get a public certificate (Let's Encrypt via Caddy) so web connectors
+#                     (claude.ai, ChatGPT) accept it; needs port 80 free. Default: self-signed + IP.
+#   --domain NAME     public certificate for your own domain (its DNS must point here); implies --cert
+#   --email ADDR      e-mail for the Let's Encrypt account (optional)
+#   --expire T        the main key stops working after T (30m, 12h, 7d)
+#   --new-key         make a new main key even if one exists
+#   --local           use the files next to this script instead of downloading (development)
+# Running it again repairs/updates the install and keeps the keys, the port and the servers.
 # Fully automatic: it never asks anything (only sudo may ask for your password).
 set -euo pipefail
 
@@ -23,6 +24,7 @@ RAW="${FATLLM_RAW:-https://raw.githubusercontent.com/SaeedCrazy/FATLLM-FULL-ACCE
 APP=/opt/fatllm
 CONF_DIR=/etc/fatllm
 CONF=$CONF_DIR/fatllm.env
+KEYS=$CONF_DIR/keys.json
 STATE=/var/lib/fatllm
 LOGS=/var/log/fatllm
 
@@ -34,6 +36,7 @@ warn() { printf '! %s\n' "$*" >&2; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 ui_wait() { sleep "$2"; }
 ui_box() { printf '%s\n' "$2"; }
+G=""
 
 # Not root? Run again through sudo, automatically.
 if [ "$(id -u)" != 0 ]; then
@@ -46,22 +49,24 @@ if [ "$(id -u)" != 0 ]; then
 fi
 
 # ------------------------------------------------------------------ options
-DOMAIN="" PORT="" FORCE_TUNNEL=0 FORCE_DIRECT=0 EMAIL="" EXPIRE="" NEW_KEY=0 UPDATE=0 LOCAL=0
+PORT="" WANT_CERT=0 DOMAIN="" EMAIL="" EXPIRE="" NEW_KEY=0 LOCAL=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --domain) DOMAIN="${2:-}"; shift 2 ;;
     --port) PORT="${2:-}"; shift 2 ;;
-    --tunnel) FORCE_TUNNEL=1; shift ;;
-    --direct | --selfsigned) FORCE_DIRECT=1; shift ;;
+    --cert) WANT_CERT=1; shift ;;
+    --no-cert | --direct) WANT_CERT=0; NO_CERT=1; shift ;;
+    --domain) DOMAIN="${2:-}"; WANT_CERT=1; shift 2 ;;
     --email) EMAIL="${2:-}"; shift 2 ;;
     --expire) EXPIRE="${2:-}"; shift 2 ;;
     --new-key) NEW_KEY=1; shift ;;
-    --update) UPDATE=1; shift ;;
+    --update) shift ;;            # re-running is always an update
+    --tunnel) die "the Cloudflare tunnel mode was removed (it was unstable). A server that can't be reached from outside joins a hub instead: run 'fatllm add-server NAME' on the hub." ;;
     --local) LOCAL=1; shift ;;
-    -h | --help) sed -n '2,19p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,22p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
 done
+NO_CERT="${NO_CERT:-0}"
 [ -z "$PORT" ] || [ "$PORT" = random ] || { [[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; } \
   || die "--port needs a number (1-65535) or 'random'"
 
@@ -75,18 +80,21 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fetch() {  # repo path -> local file
   if [ -n "$SRC" ]; then cp "$SRC/$1" "$2"
-  else curl -fsSL --retry 3 --max-time 60 "$RAW/$1" -o "$2" || die "download failed: $RAW/$1"; fi
+  else curl -fsSL --retry 3 --max-time 90 "$RAW/$1" -o "$2" || die "download failed: $RAW/$1"; fi
 }
 if fetch server/ui.sh "$TMP/ui.sh" 2>/dev/null && bash -n "$TMP/ui.sh" 2>/dev/null; then
   # shellcheck source=server/ui.sh
   . "$TMP/ui.sh"
   ui_init
-  ui_logo "installer · full server access for AI agents"
+  ui_logo "installer · server access for AI agents"
 fi
 
 # ------------------------------------------------------------------ checks
 command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || die "this server has no systemd; FATLLM needs it"
-
+if [ -f "$CONF" ] && grep -q '^FATLLM_ROLE=node' "$CONF"; then
+  hub="$(sed -n 's/^FATLLM_HUB=//p' "$CONF")"
+  die "this server is connected to the hub $hub. To make it a hub instead: run 'fatllm leave' here, then this again."
+fi
 case "$(uname -m)" in
   x86_64 | amd64) ARCH=amd64 ;;
   aarch64 | arm64) ARCH=arm64 ;;
@@ -109,6 +117,7 @@ pkg_install() {
 NEED=""
 command -v curl >/dev/null 2>&1 || NEED="$NEED curl"
 command -v python3 >/dev/null 2>&1 || NEED="$NEED python3"
+command -v openssl >/dev/null 2>&1 || NEED="$NEED openssl"
 command -v tar >/dev/null 2>&1 || NEED="$NEED tar"
 os_pretty="$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | tr -d '"')"
 ok "System: ${os_pretty:-Linux} · $ARCH · $(hostname 2>/dev/null || echo server)"
@@ -135,22 +144,26 @@ install -m 0755 "$TMP/agent.py" "$APP/agent.py"
 install -m 0644 "$TMP/srv" "$APP/srv"
 install -m 0644 "$TMP/panel.html" "$APP/panel.html"
 install -m 0644 "$TMP/ui.sh" "$APP/ui.sh"
+install -m 0755 "$TMP/fatllm" "$APP/fatllm"          # served to servers that join
 install -m 0755 "$TMP/fatllm" /usr/local/bin/fatllm
-ok "Files installed ($APP, command: fatllm)"
+rm -f "$APP/cloudflared"
+ok "Files in $APP, command: fatllm"
 
-# ------------------------------------------------------------------ old settings
-OLD_TOKEN="" OLD_MODE="" OLD_HOST="" OLD_PORT="" OLD_LOCAL="" OLD_EXPIRES="0" OLD_EMAIL=""
-if [ -f "$CONF" ]; then
-  OLD_TOKEN="$(sed -n 's/^FATLLM_TOKEN=//p' "$CONF")"
-  OLD_MODE="$(sed -n 's/^FATLLM_MODE=//p' "$CONF")"
-  OLD_HOST="$(sed -n 's/^FATLLM_HOST=//p' "$CONF")"
-  OLD_PORT="$(sed -n 's/^FATLLM_PORT=//p' "$CONF")"
-  OLD_LOCAL="$(sed -n 's/^FATLLM_LOCAL_PORT=//p' "$CONF")"
-  OLD_EXPIRES="$(sed -n 's/^FATLLM_EXPIRES=//p' "$CONF")"
-  OLD_EMAIL="$(sed -n 's/^FATLLM_EMAIL=//p' "$CONF")"
-fi
-# Stop our own services first so their ports count as free below.
-systemctl stop fatllm fatllm-caddy fatllm-tunnel >/dev/null 2>&1 || true
+# ------------------------------------------------------------------ previous install
+old() { sed -n "s/^$1=//p" "$CONF" 2>/dev/null | tail -1; }
+OLD_MODE="$(old FATLLM_MODE)" OLD_HOST="$(old FATLLM_HOST)" OLD_PORT="$(old FATLLM_PORT)"
+OLD_LOCAL="$(old FATLLM_LOCAL_PORT)" OLD_URL="$(old FATLLM_PUBLIC_URL)" OLD_EMAIL="$(old FATLLM_EMAIL)"
+OLD_TOKEN="$(old FATLLM_TOKEN)" OLD_EXPIRES="$(old FATLLM_EXPIRES)" HUB_NAME="$(old FATLLM_NAME)"
+case "$OLD_MODE" in caddy) OLD_MODE=cert ;; tunnel) OLD_MODE=""; OLD_PORT=""; OLD_URL="" ;; esac
+HUB_NAME="${HUB_NAME:-main}"
+[ -n "$EMAIL" ] || EMAIL="$OLD_EMAIL"
+if [ "$WANT_CERT" = 0 ] && [ "$NO_CERT" = 0 ] && [ "$OLD_MODE" = cert ]; then WANT_CERT=1; fi
+# a version 1 install kept its relays: they are replaced by joined servers
+for u in /etc/systemd/system/fatllm-relay-*.service /etc/systemd/system/fatllm-tunnel.service; do
+  [ -e "$u" ] || continue
+  systemctl disable --now "$(basename "$u" .service)" >/dev/null 2>&1 || true
+  rm -f "$u"
+done
 
 port_free() {  # exit 0 when nothing listens on TCP port $1
   "$PY" - "$1" <<'PY'
@@ -174,111 +187,19 @@ for fam, addr in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
 PY
 }
 
+ours_on() {  # is our own service the one listening on port $1?
+  systemctl is-active --quiet fatllm 2>/dev/null || systemctl is-active --quiet fatllm-caddy 2>/dev/null || return 1
+  [ "$1" = "$OLD_PORT" ]
+}
+
 pick_port() {  # 9001, else a random free port in 9002-9999 (away from 80/443 and common panels)
   local p
-  if port_free 9001; then echo 9001; return 0; fi
+  if port_free 9001 || ours_on 9001; then echo 9001; return 0; fi
   for _ in $(seq 1 80); do
     p=$(( 9002 + RANDOM % 998 ))
     port_free "$p" && { echo "$p"; return 0; }
   done
   return 1
-}
-
-TOKEN="$OLD_TOKEN"
-if [ "$NEW_KEY" = 1 ] || [ "${#TOKEN}" -lt 32 ]; then
-  TOKEN="$("$PY" -c 'import secrets; print("fat_" + secrets.token_urlsafe(32))')"
-  ok "Key: made a new 256-bit key"
-else
-  ok "Key: kept your existing key"
-fi
-
-LOCAL_PORT="$OLD_LOCAL"
-if [ -z "$LOCAL_PORT" ] || ! port_free "$LOCAL_PORT"; then
-  for _ in $(seq 1 50); do
-    LOCAL_PORT=$(( 20000 + RANDOM % 40000 ))
-    port_free "$LOCAL_PORT" && break
-  done
-fi
-
-EXPIRES="${OLD_EXPIRES:-0}"
-if [ -n "$EXPIRE" ]; then
-  case "$EXPIRE" in
-    never | 0) EXPIRES=0 ;;
-    *[0-9]m) EXPIRES=$(( $(date +%s) + ${EXPIRE%m} * 60 )) ;;
-    *[0-9]h) EXPIRES=$(( $(date +%s) + ${EXPIRE%h} * 3600 )) ;;
-    *[0-9]d) EXPIRES=$(( $(date +%s) + ${EXPIRE%d} * 86400 )) ;;
-    *) die "--expire takes 30m, 12h, 7d or never" ;;
-  esac
-fi
-[ -n "$EMAIL" ] || EMAIL="$OLD_EMAIL"
-
-# Extra conf fields, set by setup_direct (empty for caddy/tunnel = agent on 127.0.0.1, no TLS).
-CONF_LISTEN="" CONF_TLS_CERT="" CONF_TLS_KEY=""
-
-write_conf() {  # mode host port public_url
-  umask 077
-  cat > "$CONF" <<EOF
-# FATLLM settings (root only). The token is the secret part of the key.
-FATLLM_TOKEN=$TOKEN
-FATLLM_MODE=$1
-FATLLM_HOST=$2
-FATLLM_PORT=$3
-FATLLM_PUBLIC_URL=$4
-FATLLM_LOCAL_PORT=$LOCAL_PORT
-FATLLM_LISTEN=$CONF_LISTEN
-FATLLM_TLS_CERT=$CONF_TLS_CERT
-FATLLM_TLS_KEY=$CONF_TLS_KEY
-FATLLM_EXPIRES=$EXPIRES
-FATLLM_EMAIL=$EMAIL
-FATLLM_STATE_DIR=$STATE
-FATLLM_LOG_DIR=$LOGS
-FATLLM_RELAY_DIR=$CONF_DIR/relays
-FATLLM_CLIENT=$APP/srv
-EOF
-  chmod 600 "$CONF"
-  umask 022
-}
-
-# ------------------------------------------------------------------ agent
-write_conf "${OLD_MODE:-caddy}" "$OLD_HOST" "$OLD_PORT" ""
-cat > /etc/systemd/system/fatllm.service <<EOF
-[Unit]
-Description=FATLLM agent (shell access for an AI assistant)
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=0
-
-[Service]
-EnvironmentFile=$CONF
-ExecStart=$PY $APP/agent.py
-Restart=always
-RestartSec=2
-# Restarting the agent must not kill the commands it started.
-KillMode=process
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload
-systemctl enable fatllm >/dev/null 2>&1 || die "systemd refused the fatllm service"
-systemctl restart fatllm || die "could not start the fatllm service"
-local_ok=0
-for _ in $(seq 1 20); do
-  if curl -fsS --noproxy '*' --max-time 3 "http://127.0.0.1:$LOCAL_PORT/$TOKEN/info" >/dev/null 2>&1; then local_ok=1; break; fi
-  sleep 0.5
-done
-[ "$local_ok" = 1 ] || { journalctl -u fatllm -n 20 --no-pager >&2 || true; die "the agent did not start"; }
-ok "Agent running"
-
-# ------------------------------------------------------------------ public HTTPS
-open_port() {
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-    ufw allow "$1/tcp" >/dev/null 2>&1 && ok "Firewall (ufw): port $1 open" || true
-  fi
-  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-    firewall-cmd -q --permanent --add-port="$1/tcp" >/dev/null 2>&1 && firewall-cmd -q --reload >/dev/null 2>&1 \
-      && ok "Firewall (firewalld): port $1 open" || true
-  fi
 }
 
 public_ip() {
@@ -295,10 +216,167 @@ is_private() {
   [[ "$1" =~ ^(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]]
 }
 
+# ------------------------------------------------------------------ keys
+EXPIRE_ARGS=()
+[ -n "$EXPIRE" ] && EXPIRE_ARGS=(expire "$EXPIRE" main)
+# keys.json (a version 1 key is carried over as "main")
+FATLLM_KEYS="$KEYS" FATLLM_TOKEN="$OLD_TOKEN" FATLLM_EXPIRES="${OLD_EXPIRES:-0}" "$PY" "$APP/agent.py" admin token >/dev/null \
+  || die "could not create the keys file"
+if [ "$NEW_KEY" = 1 ]; then
+  FATLLM_KEYS="$KEYS" "$PY" "$APP/agent.py" admin rotate >/dev/null || die "could not make a new key"
+  ok "New main key (the old one stopped)"
+else
+  ok "Key ready (an existing one is kept)"
+fi
+if [ "${#EXPIRE_ARGS[@]}" -gt 0 ]; then
+  FATLLM_KEYS="$KEYS" "$PY" "$APP/agent.py" admin "${EXPIRE_ARGS[@]}" >/dev/null || die "--expire takes 30m, 12h, 7d or never"
+fi
+
+# ------------------------------------------------------------------ port and address
+IP="$(public_ip || true)"
+if [ -z "$IP" ] || is_private "$IP"; then
+  [[ "$OLD_HOST" =~ ^[0-9.]+$ ]] && IP="$OLD_HOST"
+fi
+if [ "$PORT" = random ]; then
+  PUB_PORT="$(pick_port)" || die "no free port"
+elif [ -n "$PORT" ]; then
+  PUB_PORT="$PORT"
+  port_free "$PUB_PORT" || ours_on "$PUB_PORT" || die "port $PUB_PORT is already in use; pick another or use --port random"
+elif [ -n "$OLD_PORT" ] && { port_free "$OLD_PORT" || ours_on "$OLD_PORT"; }; then
+  PUB_PORT="$OLD_PORT"
+else
+  PUB_PORT="$(pick_port)" || die "no free port"
+fi
+
+# ------------------------------------------------------------------ units
+write_conf() {  # mode host public_url listen local_port cert key
+  umask 077
+  cat > "$CONF" <<EOF
+# FATLLM hub settings (root only). The keys are in $KEYS.
+FATLLM_ROLE=hub
+FATLLM_NAME=$HUB_NAME
+FATLLM_MODE=$1
+FATLLM_HOST=$2
+FATLLM_PORT=$PUB_PORT
+FATLLM_PUBLIC_URL=$3
+FATLLM_LISTEN=$4
+FATLLM_LOCAL_PORT=$5
+FATLLM_TLS_CERT=$6
+FATLLM_TLS_KEY=$7
+FATLLM_EMAIL=$EMAIL
+FATLLM_KEYS=$KEYS
+FATLLM_STATE_DIR=$STATE
+FATLLM_LOG_DIR=$LOGS
+EOF
+  chmod 600 "$CONF"
+  umask 022
+}
+
+agent_unit() {
+  cat > /etc/systemd/system/fatllm.service <<EOF
+[Unit]
+Description=FATLLM hub (shell access for AI agents)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+EnvironmentFile=$CONF
+ExecStart=$PY $APP/agent.py
+Restart=always
+RestartSec=2
+# Restarting the agent must not kill the commands it started.
+KillMode=process
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+open_port() {
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ufw allow "$1/tcp" >/dev/null 2>&1 && ok "Firewall (ufw): port $1 open" || true
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd -q --permanent --add-port="$1/tcp" >/dev/null 2>&1 && firewall-cmd -q --reload >/dev/null 2>&1 \
+      && ok "Firewall (firewalld): port $1 open" || true
+  fi
+}
+
+# Talk to the running agent the way `fatllm` does (root-only token, never on a command line).
+# shellcheck disable=SC1090
+agent_api() { ( set -a; . "$CONF"; set +a; "$PY" "$APP/agent.py" admin api "$@" ); }
+
+check_local() {  # the new agent answers
+  local i
+  for i in $(seq 1 30); do
+    if agent_api GET /info >/dev/null 2>&1; then return 0; fi
+    ui_wait "Starting the agent ($i)" 1
+  done
+  return 1
+}
+
+# Tell connected servers about a new address/certificate before we move (they reconnect to it).
+# Runs while the old agent is still up, with the old settings file.
+rehome() {  # url [ca-pem-file]
+  local ca="" body out
+  [ -f "$CONF" ] && grep -q '^FATLLM_ROLE=hub' "$CONF" || return 0
+  "$PY" -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("nodes") else 1)' "$KEYS" 2>/dev/null || return 0
+  [ -n "${2:-}" ] && ca="$(cat "$2")"
+  body="$("$PY" -c 'import json,sys; print(json.dumps({"url": sys.argv[1], "ca": sys.argv[2]}))' "$1" "$ca")"
+  if out="$(agent_api POST /admin/servers/rehome "$body" 2>/dev/null)"; then
+    ok "Connected servers moved to $1"
+    printf '%s' "$out" | "$PY" -c 'import json,sys
+for n, v in json.load(sys.stdin)["servers"].items():
+    if v != "moved": print("%s: %s" % (n, v))' 2>/dev/null | while IFS= read -r l; do warn "not moved: $l (join it again: fatllm add-server)"; done || true
+  else
+    warn "Could not tell the connected servers about the new address; join them again: fatllm add-server NAME"
+  fi
+}
+
+setup_direct() {  # the agent serves HTTPS itself with a long-lived self-signed cert; key = bare IP
+  local host url crt key san want cfg
+  [ -n "$IP" ] || die "could not find this server's public IPv4; is it online?"
+  host="$IP"
+  url="https://$host"; [ "$PUB_PORT" = 443 ] || url="$url:$PUB_PORT"
+  mkdir -p "$STATE/tls"; chmod 700 "$STATE/tls"
+  crt="$STATE/tls/cert.pem"; key="$STATE/tls/key.pem"
+  local before=""
+  [ -s "$crt" ] && before="$(openssl x509 -in "$crt" -noout -fingerprint -sha256 2>/dev/null || true)"
+  san="IP:$host"; want="IP Address:$host"
+  if [ -s "$crt" ] && [ -s "$key" ] && openssl x509 -in "$crt" -noout -checkend 2592000 >/dev/null 2>&1 \
+      && openssl x509 -in "$crt" -noout -text 2>/dev/null | grep -qF "$want"; then
+    ok "Kept the certificate for $host"
+  else
+    cfg="$TMP/openssl.cnf"
+    printf '[req]\ndistinguished_name = dn\nx509_extensions = v3\nprompt = no\n[dn]\nCN = %s\n[v3]\nsubjectAltName = %s\n' \
+      "$host" "$san" > "$cfg"
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$key" -out "$crt" -days 3650 -config "$cfg" >/dev/null 2>&1 \
+      || die "openssl could not make a certificate"
+    ok "Self-signed certificate for $host"
+  fi
+  chmod 600 "$key" "$crt"
+  if [ "$url" != "$OLD_URL" ] || [ "$before" != "$(openssl x509 -in "$crt" -noout -fingerprint -sha256 2>/dev/null)" ]; then
+    rehome "$url" "$crt"
+  fi
+  systemctl disable --now fatllm-caddy >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/fatllm-caddy.service
+  systemctl stop fatllm >/dev/null 2>&1 || true
+  write_conf direct "$host" "$url" 0.0.0.0 "$PUB_PORT" "$crt" "$key"
+  agent_unit
+  systemctl daemon-reload
+  systemctl enable fatllm >/dev/null 2>&1 || die "systemd refused the fatllm service"
+  systemctl restart fatllm || die "could not start the fatllm service"
+  open_port "$PUB_PORT"
+  check_local || { journalctl -u fatllm -n 15 --no-pager >&2 || true; die "the agent did not start"; }
+  ok "Serving on $url"
+}
+
 get_caddy() {
   if [ -x "$APP/caddy" ] && "$APP/caddy" version >/dev/null 2>&1; then return 0; fi
   if command -v caddy >/dev/null 2>&1; then ln -sf "$(command -v caddy)" "$APP/caddy"; return 0; fi
-  say "Downloading Caddy (HTTPS)"
+  say "Downloading Caddy (for the public certificate)"
   local carch="$ARCH" extra="" ver
   [ "$ARCH" = arm ] && { carch=arm; extra="&arm=7"; }
   if curl -fsSL --max-time 180 "https://caddyserver.com/api/download?os=linux&arch=$carch$extra" -o "$TMP/caddy" \
@@ -315,57 +393,33 @@ get_caddy() {
   install -m 0755 "$TMP/caddy" "$APP/caddy"
 }
 
-get_cloudflared() {
-  if [ -x "$APP/cloudflared" ] && "$APP/cloudflared" --version >/dev/null 2>&1; then return 0; fi
-  say "Downloading cloudflared (tunnel)"
-  curl -fsSL --max-time 180 "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$ARCH" \
-    -o "$TMP/cloudflared" || return 1
-  chmod +x "$TMP/cloudflared"
-  "$TMP/cloudflared" --version >/dev/null 2>&1 || return 1
-  install -m 0755 "$TMP/cloudflared" "$APP/cloudflared"
-}
-
-setup_caddy() {  # 0 = working HTTPS with a real certificate
-  local ip host port http_ok=0 url
-  if [ -n "$DOMAIN" ]; then
-    host="$DOMAIN"
-  elif [ -n "$OLD_HOST" ] && [ "$OLD_MODE" = caddy ] && [ "${OLD_HOST%.sslip.io}" = "$OLD_HOST" ]; then
-    host="$OLD_HOST"  # the user's own domain from an earlier --domain
-  else
-    ip="$(public_ip || true)"
-    [ -n "$ip" ] || { warn "could not find this server's public IP"; return 1; }
-    is_private "$ip" && { warn "this server has no public IPv4 ($ip)"; return 1; }
-    host="${ip//./-}.sslip.io"
-  fi
-  port_free 80 && http_ok=1
-  if [ "$PORT" = random ]; then
-    port="$(pick_port)" || { warn "no free port"; return 1; }
-  elif [ -n "$PORT" ]; then
-    port="$PORT"
-    port_free "$port" || { warn "port $port is already in use"; return 1; }
-  elif [ -n "$OLD_PORT" ] && [ "$OLD_MODE" = caddy ] && port_free "$OLD_PORT"; then
-    port="$OLD_PORT"
-  else
-    port="$(pick_port)" || { warn "no free port"; return 1; }
-  fi
-  if [ "$port" != 443 ] && [ "$http_ok" = 0 ]; then
-    warn "port 80 is busy, so no public certificate can be issued here"
-    return 1
+setup_cert() {  # 0 = HTTPS with a public certificate in front of the agent
+  local host url http_ok=0 local_port i code
+  if [ -n "$DOMAIN" ]; then host="$DOMAIN"
+  elif [ -n "$OLD_HOST" ] && [ "$OLD_MODE" = cert ] && [ "${OLD_HOST%.sslip.io}" = "$OLD_HOST" ] \
+      && ! [[ "$OLD_HOST" =~ ^[0-9.]+$ ]]; then host="$OLD_HOST"
+  elif [ -n "$IP" ] && ! is_private "$IP"; then host="${IP//./-}.sslip.io"
+  else warn "could not find this server's public IPv4"; return 1; fi
+  if port_free 80; then http_ok=1; fi
+  if [ "$PUB_PORT" != 443 ] && [ "$http_ok" = 0 ]; then
+    warn "Port 80 is busy: no public certificate"; return 1
   fi
   get_caddy || { warn "could not download Caddy"; return 1; }
-
-  url="https://$host"; [ "$port" = 443 ] || url="$url:$port"
-  say "Trying a real certificate for $url"
+  url="https://$host"; [ "$PUB_PORT" = 443 ] || url="$url:$PUB_PORT"
+  [ "$url" = "$OLD_URL" ] || rehome "$url"
+  local_port="$OLD_LOCAL"
+  if [ -z "$local_port" ] || [ "$local_port" = "$PUB_PORT" ] || ! { port_free "$local_port" || [ "$OLD_MODE" = cert ]; }; then
+    for _ in $(seq 1 50); do local_port=$(( 20000 + RANDOM % 40000 )); port_free "$local_port" && break; done
+  fi
   {
     echo "{"
     echo "	admin off"
     echo "	auto_https disable_redirects"
-    [ "$http_ok" = 1 ] && echo "	http_port 80"
     [ -n "$EMAIL" ] && echo "	email $EMAIL"
     echo "}"
     echo
     echo "$url {"
-    echo "	reverse_proxy 127.0.0.1:$LOCAL_PORT {"
+    echo "	reverse_proxy 127.0.0.1:$local_port {"
     echo "		flush_interval -1"
     echo "	}"
     echo "}"
@@ -374,9 +428,10 @@ setup_caddy() {  # 0 = working HTTPS with a real certificate
     || { warn "Caddy rejected its config"; return 1; }
   cat > /etc/systemd/system/fatllm-caddy.service <<EOF
 [Unit]
-Description=FATLLM HTTPS (Caddy)
+Description=FATLLM public certificate (Caddy)
 After=network-online.target fatllm.service
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Environment=HOME=$STATE XDG_DATA_HOME=$STATE XDG_CONFIG_HOME=$STATE
@@ -388,18 +443,21 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 EOF
-  open_port "$port"
-  [ "$http_ok" = 1 ] && open_port 80
-  systemctl disable --now fatllm-tunnel >/dev/null 2>&1 || true
+  systemctl stop fatllm fatllm-caddy >/dev/null 2>&1 || true
+  write_conf cert "$host" "$url" 127.0.0.1 "$local_port" "" ""
+  agent_unit
   systemctl daemon-reload
-  systemctl enable fatllm-caddy >/dev/null 2>&1
+  systemctl enable fatllm fatllm-caddy >/dev/null 2>&1
+  systemctl restart fatllm
+  check_local || { warn "the agent did not start"; return 1; }
+  open_port "$PUB_PORT"; [ "$http_ok" = 1 ] && open_port 80
   systemctl restart fatllm-caddy
-  local i
   for i in $(seq 1 60); do
-    if curl -fsS --noproxy '*' --max-time 5 --resolve "$host:$port:127.0.0.1" "$url/$TOKEN/info" >/dev/null 2>&1; then
-      write_conf caddy "$host" "$port" "$url"
-      systemctl restart fatllm
-      ok "HTTPS with a real certificate: $url"
+    # any answer over a verified TLS connection proves the certificate (no key needed)
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 5 \
+      --resolve "$host:$PUB_PORT:127.0.0.1" "$url/" 2>/dev/null || true)"
+    if [ -n "$code" ] && [ "$code" != 000 ]; then
+      ok "HTTPS with a public certificate: $url"
       return 0
     fi
     ui_wait "Getting a certificate ($(( i * 3 ))s, up to 3 min)" 3
@@ -411,130 +469,34 @@ EOF
   return 1
 }
 
-setup_direct() {  # 0 = the agent serves HTTPS itself with a self-signed cert on a stable port
-  local ip host pub url crt key san cfg want p
-  ip="$(public_ip || true)"
-  # The key uses the bare IP unless the owner has a real domain: a self-signed certificate gains
-  # nothing from a DNS name, and *.sslip.io is filtered in some countries (Iran), which made the
-  # panel unreachable from phones there.
-  if [ -n "$DOMAIN" ]; then host="$DOMAIN"
-  elif [ -n "$OLD_HOST" ] && [ "$OLD_MODE" = direct ] && [ "${OLD_HOST%.sslip.io}" = "$OLD_HOST" ] \
-      && ! [[ "$OLD_HOST" =~ ^[0-9.]+$ ]]; then host="$OLD_HOST"
-  elif [ -n "$ip" ] && ! is_private "$ip"; then host="$ip"
-  else warn "could not find this server's public IPv4"; return 1; fi
-  command -v openssl >/dev/null 2>&1 || pkg_install openssl || { warn "openssl is needed for a self-signed certificate"; return 1; }
-
-  # Port: --port if free; else the previous one (keys stay the same); else 9001 or a random
-  # free one in 9002-9999, away from 80/443 so it never clashes with x-ui, nginx or Caddy.
-  pub=""
-  if [ -n "$PORT" ] && [ "$PORT" != random ]; then
-    if port_free "$PORT"; then pub="$PORT"; else warn "port $PORT is already in use; choosing another"; fi
-  elif [ -z "$PORT" ] && [ -n "$OLD_PORT" ] && [ "$OLD_MODE" = direct ] && port_free "$OLD_PORT"; then
-    pub="$OLD_PORT"
+if [ "$WANT_CERT" = 1 ]; then
+  if ! setup_cert; then
+    [ -n "$DOMAIN" ] && die "the certificate for $DOMAIN did not work (see above). Fix its DNS/port 80, or install without --domain."
+    say "Using a self-signed certificate instead"
+    setup_direct
   fi
-  [ -n "$pub" ] || pub="$(pick_port)" || { warn "no free port"; return 1; }
+else
+  setup_direct
+fi
 
-  mkdir -p "$STATE/tls"; chmod 700 "$STATE/tls"
-  crt="$STATE/tls/cert.pem"; key="$STATE/tls/key.pem"
-  if [[ "$host" =~ ^[0-9.]+$ ]]; then san="IP:$host"; want="IP Address:$host"
-  else san="DNS:$host"; [ -n "$ip" ] && san="$san,IP:$ip"; want="DNS:$host"; fi
-  # Keep a certificate that still covers the address, so clients that pinned it keep working.
-  if [ -s "$crt" ] && [ -s "$key" ] && openssl x509 -in "$crt" -noout -checkend 2592000 >/dev/null 2>&1 \
-      && openssl x509 -in "$crt" -noout -text 2>/dev/null | grep -qF "$want"; then
-    ok "Certificate: kept the existing one for $host"
-  else
-    cfg="$TMP/openssl.cnf"
-    cat > "$cfg" <<CFG
-[req]
-distinguished_name = dn
-x509_extensions = v3
-prompt = no
-[dn]
-CN = $host
-[v3]
-subjectAltName = $san
-CFG
-    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$key" -out "$crt" -days 3650 -config "$cfg" >/dev/null 2>&1 \
-      || { warn "openssl could not make a certificate"; return 1; }
-    ok "Certificate: self-signed for $host (valid 10 years)"
+# servers already connected get the new version too
+if "$PY" -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("nodes") else 1)' "$KEYS" 2>/dev/null; then
+  ui_wait "Waiting for the connected servers" 3
+  if out="$(agent_api POST /admin/servers/update 2>/dev/null)"; then
+    printf '%s' "$out" | "$PY" -c 'import json,sys
+for n, v in sorted(json.load(sys.stdin)["servers"].items()): print("%s\t%s" % (n, v))' 2>/dev/null \
+      | while IFS=$'\t' read -r n v; do
+          if [ "$v" = updated ]; then ok "Server $n updated"; else warn "Server $n: $v (it updates when you run this again)"; fi
+        done || true
   fi
-  chmod 600 "$key" "$crt"
-
-  url="https://$host"; [ "$pub" = 443 ] || url="$url:$pub"
-  systemctl disable --now fatllm-caddy fatllm-tunnel >/dev/null 2>&1 || true
-  LOCAL_PORT="$pub"; CONF_LISTEN="0.0.0.0"; CONF_TLS_CERT="$crt"; CONF_TLS_KEY="$key"
-  write_conf direct "$host" "$pub" "$url"
-  open_port "$pub"
-  systemctl restart fatllm
-  local up=0
-  for _ in $(seq 1 20); do
-    if curl -fsS --insecure --noproxy '*' --max-time 5 "https://127.0.0.1:$pub/$TOKEN/info" >/dev/null 2>&1; then up=1; break; fi
-    ui_wait "Starting HTTPS on port $pub" 1
-  done
-  [ "$up" = 1 ] && { ok "HTTPS (self-signed) on $url"; return 0; }
-  journalctl -u fatllm -n 15 --no-pager >&2 2>/dev/null || true
-  warn "the agent did not come up with TLS"
-  return 1
-}
-
-setup_tunnel() {
-  get_cloudflared || { warn "could not download cloudflared"; return 1; }
-  cat > /etc/systemd/system/fatllm-tunnel.service <<EOF
-[Unit]
-Description=FATLLM tunnel (Cloudflare quick tunnel)
-After=network-online.target fatllm.service
-Wants=network-online.target
-StartLimitIntervalSec=0
-
-[Service]
-ExecStart=/bin/sh -c 'exec $APP/cloudflared tunnel --no-autoupdate --retries 5 --url http://127.0.0.1:$LOCAL_PORT > $STATE/tunnel.log 2>&1'
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl disable --now fatllm-caddy >/dev/null 2>&1 || true
-  systemctl daemon-reload
-  systemctl enable fatllm-tunnel >/dev/null 2>&1
-  systemctl restart fatllm-tunnel
-  local url=""
-  for _ in $(seq 1 45); do
-    url="$(grep -aoE 'https://[a-z0-9]+(-[a-z0-9]+)+\.trycloudflare\.com' "$STATE/tunnel.log" 2>/dev/null | tail -1 || true)"
-    [ -n "$url" ] && break
-    ui_wait "Opening a Cloudflare tunnel" 1
-  done
-  [ -n "$url" ] || { warn "the tunnel gave no address"; tail -n 8 "$STATE/tunnel.log" >&2 2>/dev/null || true; return 1; }
-  write_conf tunnel "" "" ""
-  systemctl restart fatllm
-  for _ in $(seq 1 30); do
-    curl -fsS --max-time 8 "$url/$TOKEN/info" >/dev/null 2>&1 && { ok "Tunnel: $url"; return 0; }
-    ui_wait "Waiting for the tunnel to answer" 2
-  done
-  warn "tunnel address $url does not answer from here yet; it may need a minute"
-  return 0
-}
-
-if [ "$FORCE_TUNNEL" = 1 ] || { [ "$OLD_MODE" = tunnel ] && [ "$UPDATE" = 1 ] && [ "$FORCE_DIRECT" = 0 ] && [ -z "$DOMAIN$PORT" ]; }; then
-  setup_tunnel || die "the tunnel did not start. Check internet access to Cloudflare, or try --direct."
-elif [ "$FORCE_DIRECT" = 1 ] || { [ "$OLD_MODE" = direct ] && [ "$UPDATE" = 1 ] && [ "$FORCE_TUNNEL" = 0 ]; }; then
-  setup_direct || die "direct HTTPS did not work (see above). Try --domain with a real DNS name, or --tunnel."
-elif ! setup_caddy; then
-  if [ -n "$DOMAIN" ]; then
-    die "HTTPS for --domain $DOMAIN did not work (see above). Fix its DNS/ports, or use --direct or --tunnel."
-  fi
-  say "Using direct HTTPS instead (self-signed, stable address)"
-  setup_direct || {
-    warn "Direct HTTPS failed too; trying a Cloudflare tunnel."
-    setup_tunnel || die "nothing worked. Free port 80 or 443, or pass --domain, then run this again."
-  }
 fi
 
 echo
 ui_box "$G" "FATLLM is ready"
 fatllm key
 port_now="$(sed -n 's/^FATLLM_PORT=//p' "$CONF")"
-if [ -n "$port_now" ]; then
-  note "Can't connect? Open TCP port $port_now in your provider's firewall panel."
-  echo
-fi
+note "Not reachable? Open TCP port $port_now in"
+note "your provider's firewall panel."
+note "Connect another server (e.g. in Iran):"
+note "  fatllm add-server iran"
+echo

@@ -1,98 +1,91 @@
-# FATLLM: full server access for Claude
+# FATLLM: full server access for Claude (and any agent)
 
-This repo installs FATLLM on the owner's server (one command, prints a key) and lets Claude
-run that server through the key.
+This repo installs FATLLM on the owner's servers and lets an AI agent run them through one key.
+One server is the **hub** (reachable from the internet, holds the keys and the panel); any number
+of other servers **join** it and are reached through it.
 
 The owner works from a phone: reply in **Persian**, short and plain. Never ask them to run
-anything on their side except the install one-liner or a `fatllm ...` command on the server.
+anything on their side except the install one-liner, the join line, or a `fatllm ...` command.
 
-## When the user pastes a key (a line like `FATLLM key: https://<host>/fat_...`)
-1. `./srv key '<the pasted line>'` saves the key in `~/.fatllm-key` (outside the repo) and prints
-   the server's facts. The whole line, or the key with `/mcp` on the end, is fine.
-   The SessionStart hook (`.claude/session-start.sh`) already connects when `FATLLM_KEY` is set
-   in the environment or `~/.fatllm-key` exists; its note at the top of the session says so.
+## When the user pastes a key (a line like `FATLLM key: https://<ip>:9001/fat_...`)
+1. `./srv key '<the pasted line>'` saves the key in `~/.fatllm-key` (outside the repo), pins the
+   hub's self-signed certificate (`~/.fatllm-cert`) and lists the servers. The SessionStart hook
+   (`.claude/session-start.sh`) already does this when `FATLLM_KEY` is set or `~/.fatllm-key` exists.
 2. Read `./srv guide` once, then work:
-   - `./srv 'command'` (bash as root; output and `[exit N]`; srv exits with the same code)
-   - `./srv --via <relay> 'command'` routes that command's network through a relay (see below)
+   - `./srv 'command'` runs bash as root on the hub; output and `[exit N]`; srv exits with the same code
+   - `./srv --on NAME 'command'` runs it on a joined server (`./srv servers` lists them, online or not)
    - `./srv - <<'EOF' ... EOF` for scripts
    - `./srv job <id>` when a command was still running (it keeps running on the server)
-   - `./srv get <remote> [local]`, `./srv put <local> <remote> [mode]`, `./srv info`
+   - `./srv get <remote> [local]`, `./srv put <local> <remote> [mode]`, `./srv info` (all take `--on`)
+   - srv retries dropped connections with the same job id, so a command never runs twice.
 3. Work on your own. The owner granted root and does not want approval prompts for routine
    work. Ask first only before unrecoverable data loss, or before something that could lock
    them out (SSH, firewall, network config: keep their current SSH access working).
 4. Never print the full key back, never write it into the repo, never commit it.
 
-## Relays (reaching sites a server can't reach itself)
-A relay sends a command's network out through another server. `srv info` and `./srv guide` list
-the configured relays by name. Use `./srv --via <name> 'curl -s https://site'` when the target is
-blocked from the FATLLM server itself:
-- Iranian sites (Mixin, Iranian gateways) block foreign IPs → use the relay that exits in Iran.
-- Sites blocked from inside Iran (Telegram, AI, GitHub) → run WITHOUT `via` if FATLLM is on a
-  foreign server, or `via` the foreign relay if FATLLM is on the Iranian server.
-Two ways to connect another server, both set up on the FATLLM host:
-- `fatllm relay add --host <ip> --user root --name <name>`: this host dials OUT to the other server
-  (needs the other to accept inbound SSH). Installs an SSH key with a one-time password, never stored.
-- `fatllm relay reverse add --name <name>`: the OTHER server dials IN to this host. Use this when the
-  other server can't be reached from outside (an Iranian server blocks inbound, so forward `add`, the
-  panel and tunnels all fail). It prints a self-contained block the owner pastes on the other server;
-  that opens a reverse SOCKS back here. The authorized_keys entry it adds is `restrict,port-forwarding`
-  (tunnel only, no shell). Either way `via=<name>` then works the same.
-Only the owner runs these — do not ask for another server's root password in chat; point them to the command.
+## Which server for which job
+- Iranian sites (Mixin, Iranian gateways, Iranian APIs) block foreign IPs: run those checks
+  `--on` the server in Iran.
+- Sites blocked from inside Iran (Telegram, AI APIs, GitHub): run them on the foreign hub/server.
+- A joined server that is offline answers 503; it reconnects by itself. Tell the owner to run
+  `fatllm status` on that server if it stays offline.
+To connect another server, the owner runs `fatllm add-server NAME` on the hub (or the panel's
+«افزودن سرور») and pastes the printed line on the other server as root. Never ask for another
+server's root password in chat.
 
-If the key is in the environment as `FATLLM_KEY`, srv uses it; no paste is needed.
-If srv cannot reach the server: a 403 from the proxy means the cloud environment's network
-policy blocks the host. Tell the user to add the host (`*.sslip.io`, their domain or
-`*.trycloudflare.com`) under Allowed domains, or set Network access to Full. Otherwise ask them
-to run `fatllm status` on the server and send the output.
+If srv cannot reach the hub: a 403 from the proxy means the cloud environment's network policy
+blocks the host; tell the user to set Network access to Full (or allow the hub's IP). Otherwise
+ask them to run `fatllm status` on the hub and send the output.
 
-## Reachability modes (and the Cloudflare 1033 / changing-address problem)
-Three ways the key's address is served, chosen at install and switchable with `fatllm mode <m>`:
-- `caddy`: Caddy gets a real Let's Encrypt cert for `<ip>.sslip.io` (or `--domain`) on the FATLLM
-  port. Needs port 80 free (or the port to be 443). Works with the claude.ai connector. Stable address.
-- `direct`: the agent serves HTTPS itself with a long-lived self-signed cert on a stable port
-  (agent env `FATLLM_TLS_CERT`/`FATLLM_TLS_KEY`, binds `0.0.0.0`). No port 80/443 or Cloudflare
-  needed; works from Iran. The key uses the bare server IP (`https://<ip>[:port]/fat_...`), not
-  `*.sslip.io`, because sslip.io is filtered in Iran; default port 9001.
-  Re-running keeps the certificate while it still covers the address, so pinned clients keep working. `srv` trusts it by pinning the cert on `srv key` (TOFU → `~/.fatllm-cert`,
-  used as `--cacert`). The claude.ai website connector will NOT trust it (needs a public cert).
-- `tunnel`: Cloudflare quick tunnel. Last resort — the address changes on every restart (so a saved
-  key goes stale) and can show Cloudflare error 1033 when the tunnel drops.
-If a user reports error 1033 or an address that keeps changing, tell them to run `fatllm mode direct`
-on the server (stable, Claude-Code-friendly), or `fatllm mode caddy` / `--domain` if they need the
-claude.ai connector.
-
-## Port
-Default port 9001, else a random free one in 9002-9999 (`pick_port` in install.sh); never 80/443 on its
-own, so it never clashes with x-ui, nginx or Caddy. A re-run keeps the previous port. `--port N|random`
-or `fatllm port N|random` moves it (the key's address changes; the token stays).
+## Design (v2)
+- **Hub** (`FATLLM_ROLE=hub`): `server/agent.py` serves HTTPS itself (mode `direct`, default) with a
+  10-year self-signed certificate for the bare IP (no sslip.io: filtered in Iran), port 9001, else a
+  random free one in 9002-9999 (never 80/443). Optional mode `cert`: Caddy + Let's Encrypt on
+  `<ip>.sslip.io` or `--domain`, for web connectors (claude.ai/ChatGPT) that need a public cert.
+  The Cloudflare tunnel and SSH relays of v1 are gone (unstable; replaced by joined servers).
+- **Nodes** (`FATLLM_ROLE=node`): the same agent.py. They dial OUT to the hub and long-poll
+  `/node/poll` (results to `/node/result`), so they need no open port. The join line is
+  `curl -fsSk --pinnedpubkey 'sha256//PIN' https://hub/join_XXX | bash` (pin = the hub's key, so
+  the download cannot be swapped); it installs the node with its own node token and the hub's
+  certificate as its CA. Join tokens live 2 h and die on first contact.
+- **One op layer** (`run job jobs stat list read write commit info stats audit ping`, plus node-only
+  `update set_hub uninstall`): the same code serves local and remote calls. `?on=NAME` / MCP
+  `server` pick the target.
+- **No double runs:** clients pass `?id=<8-32 hex>`; asking again with the same id returns the same
+  job. Jobs write to log files and survive dropped connections and agent restarts (`KillMode=process`).
+- **Keys:** `/etc/fatllm/keys.json` (0600, flock, reloaded on change): named keys with expiry, nodes,
+  pending joins. A v1 `FATLLM_TOKEN` is migrated as key `main`.
+- **Local admin:** the hub writes a root-only `/var/lib/fatllm/cli.token`; `fatllm` (through
+  `agent.py admin api ...`) sends it as a Bearer header from 127.0.0.1, so the CLI keeps working
+  when the main key is expired or rotated, and no secret appears in a process list.
+- Moving the hub (port/IP/certificate change) first tells online nodes the new address and CA
+  (`/admin/servers/rehome` → `set_hub`); `fatllm update` pushes the new agent to every online node.
 
 ## Files
-- `install.sh`: one-line installer; never asks anything (re-runs itself with sudo when not root).
-  Picks a mode automatically: caddy if it can get a public cert, else direct self-signed (stable),
-  else tunnel. `--direct`/`--tunnel`/`--domain`/`--port` force a choice.
-  Re-running keeps the key. `--local` uses the files in this checkout (development only).
-- `server/agent.py`: the agent (Python 3.6+, standard library only). HTTP endpoints and an MCP
-  server; see its docstring. Token in the first path segment or `Authorization: Bearer`.
-  Commands run as jobs with output in a log file, so long commands survive the HTTP call and
-  agent restarts (`KillMode=process`).
-- `server/panel.html`: the owner's web panel at `<key>/panel` (Persian, RTL, phone-first, dark/light;
-  one self-contained file, no external requests; served with a nonce CSP). It learns its key from
-  its own address and calls the agent's endpoints: `/stats`, `/audit`, `/jobs?json=1`,
-  `/file?json=1` (directory listing), `/file?download=1`, `/run` + `/job/<id>?json=1&offset=`,
-  `/admin/expire`, `/admin/rotate` (new token in memory + env file, old key dies at once),
-  `/admin/off` (runs `fatllm off` after answering). Check it at 390px in both themes with
-  Playwright before committing UI changes (no sideways scroll, no console errors).
-- `server/ui.sh`: the terminal look shared by install.sh and fatllm (logo, colours, ✓/!/✗ lines,
-  spinners, boxes). Colours only on a real terminal, ASCII fallback (`FATLLM_ASCII=1`), and nothing
-  wider than the screen: check new output at 46 columns (`script -qc "stty cols 46; ..."`).
-- `server/fatllm`: the owner's CLI on the server (key, rotate, off/on, status, log, expire, mode,
-  relay, update, uninstall). `fatllm` with no arguments on a terminal opens a numbered menu.
+- `install.sh`: hub installer; never asks anything (re-runs itself with sudo). Options `--port N|random`,
+  `--cert`, `--domain`, `--email`, `--expire`, `--new-key`, `--local` (this checkout). Re-running keeps
+  keys, port and servers. A node refuses it (`fatllm leave` first).
+- `server/agent.py`: hub and node (Python 3.6+, standard library only); docstring lists the HTTP API.
+  `agent.py admin ...` = key-store chores for `fatllm` (token, show, keys, add, remove, rotate, expire,
+  pin, api, log, leave, node). `JOIN_SCRIPT` is the node installer the hub serves.
+- `server/panel.html`: owner's web panel at `<key>/panel` (Persian, RTL, phone-first, Pingo theme from
+  the EZ/xui-chain panels, dark/light; one self-contained file, nonce CSP, no external requests).
+  Server switcher, dials, terminal (idempotent ids + retry), files, activity, keys, add-server flow.
+  Check it at 390px in both themes with Playwright before committing (no sideways scroll, no console errors).
+- `server/ui.sh`: terminal look for install.sh and fatllm (Pingo palette: truecolor, 256 or plain;
+  ASCII fallback `FATLLM_ASCII=1`). Never wider than the screen: check output at 46 columns
+  (`script -qc "stty cols 46; ..."`).
+- `server/fatllm`: the owner's CLI (menu with no arguments). Hub: key, status, servers, add-server,
+  remove-server, keys, rotate, expire, log, off/on, port, mode, test, update, uninstall. Node: status,
+  log, off/on, leave.
 - `srv`: client. The agent serves it at `<key>/srv` with the key built in.
 - `.claude/settings.json`: allows `./srv`, `srv`, `~/srv` and the `fatllm` MCP tools without prompts,
-  and runs `.claude/session-start.sh` (links `srv` into /usr/local/bin, checks the key).
+  and runs `.claude/session-start.sh`.
 
 ## Rules
-- Text printed on the server (install.sh, fatllm, agent) stays English: phone SSH apps show Persian badly.
-- The key never reaches logs: the agent does not log request lines, the audit log has commands only.
+- Text printed on servers (install.sh, fatllm, agent, join script) stays English: phone SSH apps show
+  Persian badly.
+- The key never reaches logs: the agent does not log request lines; the audit log has no tokens.
 - Before committing: `python3 -m unittest discover -s test -v` and
-  `shellcheck -S warning install.sh srv server/fatllm` (`pip install shellcheck-py`).
+  `shellcheck -S warning install.sh srv server/fatllm server/ui.sh .claude/session-start.sh`
+  (`pip install shellcheck-py`).

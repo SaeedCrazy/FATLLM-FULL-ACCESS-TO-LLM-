@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
-# srv: run commands on your server through its FATLLM key.
+# srv: run commands on your servers through a FATLLM key.
 #
-#   srv key <KEY>                  save the key (in ~/.fatllm-key) and test it
-#   srv '<command>'                run a bash command as root, print output + [exit N]
-#   srv --via <relay> '<command>'  run it routed through a relay (e.g. --via iran)
-#   srv - <<'EOF' ... EOF          run a multi-line script from stdin
-#   srv job <id> [wait]            output/status of a command that was still running
-#   srv kill <id>                  stop it
-#   srv jobs                       recent commands
-#   srv get <remote> [local]       download a file (no local name: print it)
+#   srv key <KEY>                    save the key (in ~/.fatllm-key) and test it
+#   srv '<command>'                  run a bash command as root on the hub, print output + [exit N]
+#   srv --on NAME '<command>'        run it on another server connected to the hub
+#   srv - <<'EOF' ... EOF            run a multi-line script from stdin
+#   srv servers                      the hub and its servers (online or not)
+#   srv job <id> [wait]              output/status of a command that was still running
+#   srv kill <id>                    stop it
+#   srv jobs | info | guide          recent commands | server facts | the full guide
+#   srv get <remote> [local]         download a file (no local name: print it)
 #   srv put <local> <remote> [mode]  upload a file
-#   srv info | guide               server facts | full usage guide
 #
-# The key comes from $FATLLM_KEY, else the built-in key, else ~/.fatllm-key.
-# Env: SRV_WAIT (seconds to wait before handing back a job id, default 50), SRV_CWD.
+# --on NAME (or -s NAME) works with every command. The key comes from $FATLLM_KEY, else the
+# built-in key, else ~/.fatllm-key. Env: SRV_WAIT (seconds to wait, default 50), SRV_CWD.
+# If the connection drops, srv retries with the same job id: a command never runs twice.
 # Exit status: the remote command's exit code when it finished.
 set -euo pipefail
 
 BAKED_KEY=""
 KEY_FILE="${FATLLM_KEY_FILE:-$HOME/.fatllm-key}"
-CERT_FILE="${FATLLM_CERT_FILE:-$HOME/.fatllm-cert}"   # pinned self-signed cert (direct mode)
+CERT_FILE="${FATLLM_CERT_FILE:-$HOME/.fatllm-cert}"   # pinned self-signed certificate of the hub
 
 die() { echo "srv: $*" >&2; exit 2; }
 
-# curl, trusting the pinned cert when there is one (self-signed "direct" servers).
 TLS=()
 [ -s "$CERT_FILE" ] && TLS=(--cacert "$CERT_FILE")
 rc() { if [ "${#TLS[@]}" -gt 0 ]; then curl "${TLS[@]}" "$@"; else curl "$@"; fi; }
@@ -33,7 +33,7 @@ clean_key() {  # the key out of a pasted line ("FATLLM key: https://.../fat_..."
   if [[ "$k" =~ (https?://[^[:space:]/]+/fat_[A-Za-z0-9_-]+) ]]; then
     k="${BASH_REMATCH[1]}"
   else
-    k="${k//[[:space:]]/}"; k="${k%/}"; k="${k%/mcp}"; k="${k%/srv}"; k="${k%/}"
+    k="${k//[[:space:]]/}"; k="${k%/}"; k="${k%/mcp}"; k="${k%/srv}"; k="${k%/panel}"; k="${k%/}"
   fi
   printf '%s' "$k"
 }
@@ -58,35 +58,59 @@ urlenc() {
   printf '%s' "$out"
 }
 
-# POST a command (from stdin) and print the answer; exit with the remote exit code.
+ON=""
+onq() { [ -n "$ON" ] && printf '&on=%s' "$(urlenc "$ON")"; return 0; }
+rand_id() { od -An -N6 -tx1 /dev/urandom | tr -d ' \n'; }
+
+# Run a command (from stdin). Retries with the same job id when the connection drops or the hub
+# answers 502/503/504, so the command starts at most once. Exits with the remote exit code.
 run_stdin() {
-  local key wait hdr code
+  local key wait id url tmp http code rcode why tries=0 delay=2
   key="$(get_key)"
   wait="${SRV_WAIT:-50}"
-  hdr="$(mktemp)"
-  local url="$key/run?wait=$wait"
+  id="$(rand_id)"
+  tmp="$(mktemp -d)"
+  cat > "$tmp/body"
+  url="$key/run?wait=$wait&id=$id$(onq)"
   [ -n "${SRV_CWD:-}" ] && url="$url&cwd=$(urlenc "$SRV_CWD")"
-  [ -n "${VIA:-}" ] && url="$url&via=$(urlenc "$VIA")"
-  if ! rc -sS --max-time "$((wait + 60))" -D "$hdr" -H 'Content-Type: text/plain' \
-      --data-binary @- "$url"; then
-    rm -f "$hdr"; die "could not reach the server (network policy? key? 'fatllm status' on the server)"
-  fi
-  code="$(tr -d '\r' < "$hdr" | awk -F': ' 'tolower($1)=="x-exit-code"{print $2}' | tail -1)"
-  rm -f "$hdr"
+  while :; do
+    rcode=0
+    http="$(rc -sS --max-time "$((wait + 120))" -D "$tmp/hdr" -o "$tmp/out" -w '%{http_code}' \
+      -H 'Content-Type: text/plain' --data-binary @"$tmp/body" "$url" 2>"$tmp/err")" || rcode=$?
+    if [ "$rcode" = 0 ] && [ "${http:-0}" -lt 500 ]; then break; fi
+    if [ "$rcode" = 0 ] && [ "$http" != 502 ] && [ "$http" != 503 ] && [ "$http" != 504 ]; then break; fi
+    tries=$((tries + 1))
+    if [ "$tries" -gt 6 ]; then
+      cat "$tmp/out" 2>/dev/null >&2 || true; cat "$tmp/err" >&2 || true; rm -rf "$tmp"
+      die "gave up after $tries tries (job $id). Check the network policy or run 'fatllm status' on the server."
+    fi
+    why="http ${http:-none}"; [ "$rcode" != 0 ] && why="network error $rcode"
+    echo "srv: connection problem ($why); retrying in ${delay}s, job $id" >&2
+    sleep "$delay"; delay=$(( delay * 2 > 30 ? 30 : delay * 2 ))
+  done
+  cat "$tmp/out"
+  code="$(tr -d '\r' < "$tmp/hdr" | awk -F': ' 'tolower($1)=="x-exit-code"{print $2}' | tail -1)"
+  rm -rf "$tmp"
+  if [ "${http:-200}" -ge 400 ]; then exit 2; fi
   [ -n "$code" ] && exit "$code"
   exit 0
 }
 
-VIA=""
-if [ "${1:-}" = --via ] || [ "${1:-}" = via ]; then
-  VIA="${2:-}"; [ -n "$VIA" ] || die "usage: srv --via <relay> '<command>'"
-  shift 2
-fi
+# Global option: --on NAME / -s NAME (before or after the command word).
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --on | -s | --server) ON="${2:-}"; [ -n "$ON" ] || die "usage: srv --on NAME ..."; shift 2 ;;
+    --on=*) ON="${1#--on=}"; shift ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 cmd="${1:-}"
 case "$cmd" in
   "" | -h | --help | help)
-    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   key)
     [ -n "${2:-}" ] || die "usage: srv key '<key>'"
@@ -95,7 +119,7 @@ case "$cmd" in
     umask 077
     rm -f "$CERT_FILE"; TLS=()
     if ! curl -fsS --max-time 20 "$k/info" >/dev/null 2>&1; then
-      # Not a publicly-trusted certificate: maybe a self-signed "direct" server. Pin its cert.
+      # Not a publicly trusted certificate: the hub's own (self-signed) one. Pin it.
       hp="${k#*://}"; hp="${hp%%/*}"; khost="${hp%%:*}"; kport="${hp##*:}"; [ "$kport" = "$khost" ] && kport=443
       if command -v openssl >/dev/null 2>&1; then
         printf '' | openssl s_client -connect "$khost:$kport" -servername "$khost" 2>/dev/null \
@@ -104,45 +128,51 @@ case "$cmd" in
       if [ -s "$CERT_FILE" ] && curl -fsS --max-time 20 --cacert "$CERT_FILE" "$k/info" >/dev/null 2>&1; then
         TLS=(--cacert "$CERT_FILE"); echo "self-signed certificate pinned ($CERT_FILE)"
       else
-        rm -f "$CERT_FILE"; die "the server did not answer, or its certificate could not be trusted (network policy? 'fatllm status' on the server?)"
+        rm -f "$CERT_FILE"
+        die "the server did not answer, or its certificate could not be trusted (network policy? 'fatllm status' on the server?)"
       fi
     fi
     printf '%s\n' "$k" > "$KEY_FILE"
     echo "key saved in $KEY_FILE"
-    rc -fsS --max-time 20 "$k/info" || die "saved, but the server did not answer"
+    rc -fsS --max-time 20 "$k/servers" || die "saved, but the server did not answer"
     ;;
   -)
     run_stdin
     ;;
+  servers)
+    rc -fsS --max-time 30 "$(get_key)/servers" || die "the server did not answer (key wrong or turned off? network policy?)"
+    ;;
   job)
     [ -n "${2:-}" ] || die "usage: srv job <id> [wait]"
-    rc -sS --max-time "$(( ${3:-30} + 60 ))" "$(get_key)/job/$2?wait=${3:-30}"
+    rc -sS --max-time "$(( ${3:-30} + 90 ))" "$(get_key)/job/$2?wait=${3:-30}$(onq)"
     ;;
   kill)
     [ -n "${2:-}" ] || die "usage: srv kill <id>"
-    rc -sS -X POST "$(get_key)/job/$2/kill"
+    rc -sS -X POST "$(get_key)/job/$2/kill?x=1$(onq)"
     ;;
   info)
-    rc -fsS --max-time 30 "$(get_key)/info" || die "the server did not answer (key wrong or turned off? network policy?)"
+    rc -fsS --max-time 60 "$(get_key)/info?x=1$(onq)" || die "the server did not answer (offline? key wrong? network policy?)"
     ;;
-  jobs | guide)
-    path="$cmd"; [ "$cmd" = guide ] && path=""
-    rc -sS --max-time 30 "$(get_key)/$path"
+  jobs)
+    rc -sS --max-time 60 "$(get_key)/jobs?x=1$(onq)"
+    ;;
+  guide)
+    rc -sS --max-time 30 "$(get_key)/"
     ;;
   get)
     [ -n "${2:-}" ] || die "usage: srv get <remote path> [local path]"
     if [ -n "${3:-}" ]; then
-      rc -fsS "$(get_key)/file?path=$(urlenc "$2")" -o "$3" && echo "saved $3"
+      rc -fsS --retry 3 "$(get_key)/file?path=$(urlenc "$2")$(onq)" -o "$3" && echo "saved $3"
     else
-      rc -sS "$(get_key)/file?path=$(urlenc "$2")"
+      rc -sS "$(get_key)/file?path=$(urlenc "$2")$(onq)"
     fi
     ;;
   put)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || die "usage: srv put <local file> <remote path> [mode]"
     [ -f "$2" ] || die "no such local file: $2"
-    q="path=$(urlenc "$3")"
+    q="path=$(urlenc "$3")$(onq)"
     [ -n "${4:-}" ] && q="$q&mode=$4"
-    rc -sS -T "$2" "$(get_key)/file?$q"
+    rc -sS --retry 3 -T "$2" "$(get_key)/file?$q"
     ;;
   *)
     printf '%s' "$*" | run_stdin

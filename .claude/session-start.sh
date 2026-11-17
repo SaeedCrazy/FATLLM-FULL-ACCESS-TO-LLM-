@@ -9,13 +9,14 @@ if [ -z "${FATLLM_KEY:-}" ] && [ ! -s "$HOME/.fatllm-key" ]; then
   echo "FATLLM: no server key yet. When the user pastes one (a line with https://.../fat_...), run: ./srv key '<that line>'"
   exit 0
 fi
-if out="$("$DIR/srv" info 2>&1)"; then
-  echo "FATLLM: connected to the owner's server. Run commands with ./srv (see CLAUDE.md). Server facts:"
-  printf '%s\n' "$out" | head -20
+if out="$("$DIR/srv" servers 2>&1)"; then
+  echo "FATLLM: connected to the owner's hub. Run commands with ./srv (hub) or ./srv --on NAME (another"
+  echo "server); see CLAUDE.md. Servers:"
+  printf '%s\n' "$out" | head -30
 else
   echo "FATLLM: a key is set but the server did not answer:"
   printf '%s\n' "$out" | tail -3
   echo "A proxy 403 means the cloud environment's network policy blocks the host (tell the user to set Network access to Full)."
-  echo "Otherwise ask the user to run 'fatllm status' on the server."
+  echo "Otherwise ask the user to run 'fatllm status' on the hub."
 fi
 exit 0
