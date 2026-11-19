@@ -119,7 +119,7 @@ command -v curl >/dev/null 2>&1 || NEED="$NEED curl"
 command -v python3 >/dev/null 2>&1 || NEED="$NEED python3"
 command -v openssl >/dev/null 2>&1 || NEED="$NEED openssl"
 command -v tar >/dev/null 2>&1 || NEED="$NEED tar"
-os_pretty="$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | tr -d '"')"
+os_pretty="$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | tr -d '"' || true)"
 ok "System: ${os_pretty:-Linux} · $ARCH · $(hostname 2>/dev/null || echo server)"
 if [ -n "$NEED" ]; then
   say "Installing:$NEED"
@@ -150,7 +150,8 @@ rm -f "$APP/cloudflared"
 ok "Files in $APP, command: fatllm"
 
 # ------------------------------------------------------------------ previous install
-old() { sed -n "s/^$1=//p" "$CONF" 2>/dev/null | tail -1; }
+# (a fresh server has no settings file: that must give "", not stop the script under set -e)
+old() { [ -f "$CONF" ] || return 0; sed -n "s/^$1=//p" "$CONF" | tail -n 1; }
 OLD_MODE="$(old FATLLM_MODE)" OLD_HOST="$(old FATLLM_HOST)" OLD_PORT="$(old FATLLM_PORT)"
 OLD_LOCAL="$(old FATLLM_LOCAL_PORT)" OLD_URL="$(old FATLLM_PUBLIC_URL)" OLD_EMAIL="$(old FATLLM_EMAIL)"
 OLD_TOKEN="$(old FATLLM_TOKEN)" OLD_EXPIRES="$(old FATLLM_EXPIRES)" HUB_NAME="$(old FATLLM_NAME)"
@@ -208,8 +209,9 @@ public_ip() {
     ip="$(curl -4 -fsS --max-time 6 "$u" 2>/dev/null | tr -d ' \r\n' || true)"
     [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && { echo "$ip"; return 0; }
   done
-  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')"
-  [ -n "$ip" ] && echo "$ip"
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}' || true)"
+  [ -n "$ip" ] || return 1
+  echo "$ip"
 }
 
 is_private() {
@@ -220,13 +222,18 @@ is_private() {
 EXPIRE_ARGS=()
 [ -n "$EXPIRE" ] && EXPIRE_ARGS=(expire "$EXPIRE" main)
 # keys.json (a version 1 key is carried over as "main")
+HAD_KEYS=0; [ -s "$KEYS" ] && HAD_KEYS=1
 FATLLM_KEYS="$KEYS" FATLLM_TOKEN="$OLD_TOKEN" FATLLM_EXPIRES="${OLD_EXPIRES:-0}" "$PY" "$APP/agent.py" admin token >/dev/null \
   || die "could not create the keys file"
 if [ "$NEW_KEY" = 1 ]; then
   FATLLM_KEYS="$KEYS" "$PY" "$APP/agent.py" admin rotate >/dev/null || die "could not make a new key"
   ok "New main key (the old one stopped)"
+elif [ "$HAD_KEYS" = 1 ]; then
+  ok "Keys kept (your key still works)"
+elif [ -n "$OLD_TOKEN" ]; then
+  ok "Your version 1 key is kept"
 else
-  ok "Key ready (an existing one is kept)"
+  ok "New key made"
 fi
 if [ "${#EXPIRE_ARGS[@]}" -gt 0 ]; then
   FATLLM_KEYS="$KEYS" "$PY" "$APP/agent.py" admin "${EXPIRE_ARGS[@]}" >/dev/null || die "--expire takes 30m, 12h, 7d or never"

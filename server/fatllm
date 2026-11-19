@@ -243,7 +243,7 @@ add_server() {  # NAME [--no-wait]
   [ "$UI_TTY" = 1 ] && [ -t 0 ] || return 0
   echo
   for i in $(seq 1 1800); do
-    st="$(servers_tsv 2>/dev/null | awk -F'\037' -v n="$name" '$1==n{print $2}')"
+    st="$(servers_tsv 2>/dev/null | awk -F'\037' -v n="$name" '$1==n{print $2}' || true)"
     if [ "$st" = online ]; then
       ok "$name connected. Your AI can use it:"
       note "srv --on $name 'command'"

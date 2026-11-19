@@ -82,6 +82,13 @@ ask them to run `fatllm status` on the hub and send the output.
 - `.claude/settings.json`: allows `./srv`, `srv`, `~/srv` and the `fatllm` MCP tools without prompts,
   and runs `.claude/session-start.sh`.
 
+## Tests
+- `test/test_agent.py`: hub, a real node over TLS, srv, the `fatllm` CLI.
+- `test/test_install.py`: runs the real install.sh with every system path moved into a temp folder
+  and a stand-in systemctl: fresh server (no settings file), re-run, upgrade from version 1.
+  install.sh runs under `set -euo pipefail`: a `$(...)` that fails (e.g. reading a file that does not
+  exist yet) ends it silently, so guard such reads (`[ -f f ] || return 0`) and keep this test green.
+
 ## Rules
 - Text printed on servers (install.sh, fatllm, agent, join script) stays English: phone SSH apps show
   Persian badly.
